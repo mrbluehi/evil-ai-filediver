@@ -72,7 +72,7 @@ The GUI uses native graphics/audio bindings and therefore needs the platform bui
 
 **Extract the archive. This will create a folder named `filediver-cli`, containing `filediver.exe`, `ffmpeg.exe`, the license, and this README.**
 
-The program is called "filediver.exe" (or just "filediver" on Linux). See [usage](#usage).
+On Windows, double-click `Run Filediver CLI.bat` to keep a command prompt open with the help page and enter commands. You can also run `filediver.exe` from an existing terminal. The CLI is not a graphical application. On Linux, run `filediver` from a terminal. See [usage](#usage).
 
 ### Helper scripts (scripts_dist)
 - [Windows (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/scripts-dist-windows.zip)

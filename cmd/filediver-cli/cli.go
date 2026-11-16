@@ -48,6 +48,13 @@ func cliHandleArgs(configStruct any, addExtraArgs func(argp *argparse.Parser)) (
 	showHelp := false
 	showAdvancedHelp := false
 	showHelpNoPager := false
+	// The CLI is sometimes started by double-clicking its executable in
+	// Explorer. Show usage in that case instead of exiting with the missing
+	// selection error, which looks like a failed launch when the console closes.
+	if len(args) == 0 {
+		showHelp = true
+		showHelpNoPager = true
+	}
 	if slices.Contains(args, "-h") || slices.Contains(args, "--help") {
 		showHelp = true
 	}
