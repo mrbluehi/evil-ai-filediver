@@ -19,8 +19,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-      with:
-        ref: ${{ inputs.release_tag || github.ref }}
     - name: Setup Go
       uses: actions/setup-go@v5
       with:
@@ -53,8 +51,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-      with:
-        ref: ${{ inputs.release_tag || github.ref }}
     - name: Setup Go
       uses: actions/setup-go@v5
       with:
@@ -91,8 +87,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-      with:
-        ref: ${{ inputs.release_tag || github.ref }}
     - name: Install uv by astral.sh
       run: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
     - name: Build hd2_accurate_blender_importer executable
@@ -122,8 +116,6 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-      with:
-        ref: ${{ inputs.release_tag || github.ref }}
     - name: Install uv by astral.sh
       run: curl -LsSf https://astral.sh/uv/install.sh | sh
     - name: Build hd2_accurate_blender_importer executable
