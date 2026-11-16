@@ -64,7 +64,7 @@ jobs:
         mkdir filediver-cli
         cp README.md LICENSE filediver-cli/
     - name: Build CLI executable
-      run: go build -o filediver-cli/filediver.exe ./cmd/filediver-cli
+      run: go build -trimpath -ldflags="-s -w -X main.version=${{ inputs.release_tag || github.ref_name }} -extldflags=-static" -o filediver-cli/filediver.exe ./cmd/filediver-cli
     - name: Download FFmpeg binary
       shell: bash
       run: |

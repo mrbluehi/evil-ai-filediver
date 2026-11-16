@@ -990,7 +990,12 @@ func (g *UnitGallery) DrawCaptureFrame() {
 	}
 
 	renderer := g.activeCaptureRenderer()
-	allowPending := g.itemType == ArmorSetTypeHash && time.Since(g.captureStarted) > 15*time.Second
+	// Some game assets reference textures that never finish decoding (or are
+	// missing from the selected build). Do not leave the whole thumbnail queue
+	// showing "Rendering…" forever; after a bounded wait, show a session-only
+	// capture and let the next launch retry with a fresh resource state. A
+	// capture is still written to disk only after all material textures settle.
+	allowPending := time.Since(g.captureStarted) > 15*time.Second
 	pixels, settled, err := renderer.drawCaptureFrame(allowPending)
 	if err != nil {
 		g.failed[g.capturing] = err.Error()
@@ -1526,6 +1531,10 @@ func (g *UnitGallery) trimThumbnailCache(keep stingray.FileID) {
 		}
 		gl.DeleteTextures(1, &oldest.textureID)
 		delete(g.thumbnails, oldestID)
+		// diskChecked only avoids repeating a failed disk lookup while an item
+		// is resident. Once its GPU thumbnail is evicted, allow drawCard to load
+		// the saved JPEG again when the user scrolls back to it.
+		delete(g.diskChecked, oldestID)
 	}
 }
 

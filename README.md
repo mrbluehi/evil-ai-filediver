@@ -70,7 +70,7 @@ The GUI uses native graphics/audio bindings and therefore needs the platform bui
 - [Download CLI Windows (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/filediver-cli-windows.zip)
 - [Download CLI Linux (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/filediver-cli-linux.zip)
 
-**Extract the archive. This will create a folder named `filediver`, where everything relevant is located.**
+**Extract the archive. This will create a folder named `filediver-cli`, containing `filediver.exe`, `ffmpeg.exe`, the license, and this README.**
 
 The program is called "filediver.exe" (or just "filediver" on Linux). See [usage](#usage).
 
@@ -78,7 +78,7 @@ The program is called "filediver.exe" (or just "filediver" on Linux). See [usage
 - [Windows (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/scripts-dist-windows.zip)
 - [Linux (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/scripts-dist-linux.tar.xz)
 
-**CLI Only: Extract the helper scripts achive into the `filediver` folder (the same folder containing the executable, e.g. `filediver.exe`).**
+**CLI Only: Extract the helper scripts archive into the `filediver-cli` folder (the same folder containing the executable, e.g. `filediver.exe`).**
 
 ## Export features
 - Video to bink/mp4
