@@ -1,6 +1,6 @@
 # Evil AI Filediver
 
-**An unofficial, community-maintained, AI-generated and AI-assisted fork of [Filediver](https://github.com/xypwn/filediver).** This fork adds Helldivers-focused research, browsing, comparison, animation, and preview features to the original Filediver source. The custom additions were developed with substantial AI assistance and are maintained for the `mrbluehi/evil-ai-filediver` fork.
+**An unofficial, AI-generated fork of [Filediver](https://github.com/xypwn/filediver).** This fork adds Helldivers-focused research, browsing, comparison, animation, and preview features to the original Filediver source. The custom additions were developed with substantial AI assistance and are maintained for the `mrbluehi/evil-ai-filediver` fork.
 
 This project is not affiliated with Arrowhead Game Studios, Sony Interactive Entertainment, or the original Filediver maintainers. The upstream project and its contributors retain their original credit and license; see the upstream [Filediver repository](https://github.com/xypwn/filediver) and the license included here. The source repository does not bundle Helldivers game archives.
 
