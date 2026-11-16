@@ -20,7 +20,7 @@ This project is not affiliated with Arrowhead Game Studios, Sony Interactive Ent
 
 ### Animation preview
 
-Factory Strider and Bile Titan animation playback in the custom animation viewer:
+Examples of Factory Strider and Bile Titan animation playback in the custom animation viewer:
 
 ![Factory Strider animation preview](docs/media/factory-strider-animation.gif)
 
