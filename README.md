@@ -6,7 +6,7 @@ This project is not affiliated with Arrowhead Game Studios, Sony Interactive Ent
 
 ## Custom feature demonstrations
 
-### Texture browser
+### Grid based texture browser
 
 ![Texture browser grid with texture previews, sharp display, grid sizing, and resolution sorting](docs/media/texture-browser.png)
 
@@ -14,7 +14,7 @@ This project is not affiliated with Arrowhead Game Studios, Sony Interactive Ent
 
 ![Localized string search showing filtered enemy-name matches and highlighted search text](docs/media/string-search.png)
 
-### Unit browser
+### grid based unit browser
 
 ![Unit grid showing preview-angle capture, animation filtering, and file-size sorting](docs/media/unit-browser.png)
 
