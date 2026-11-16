@@ -20011,3 +20011,4 @@ xl_t_connection
 yaw
 yellow_guideline
 zipper_grenade
+content/env_ship/armory/rifle_13mm

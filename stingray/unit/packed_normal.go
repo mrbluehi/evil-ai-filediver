@@ -114,3 +114,26 @@ func DecodePackedNormal(v uint32) (normal mgl32.Vec3, tangent mgl32.Vec4, bitang
 
 	return
 }
+
+// DecodeOctahedralNormalS8 decodes a normal stored as two signed normalized
+// bytes. Older game builds use this compact form in their vertex layouts.
+func DecodeOctahedralNormalS8(v [2]int8) (normal mgl32.Vec3, tangent mgl32.Vec4, bitangent mgl32.Vec3) {
+	x := max(float32(v[0])/127.0, -1.0)
+	y := max(float32(v[1])/127.0, -1.0)
+	normal = decodeOctahedral(mgl32.Vec2{x, y})
+
+	// The two-byte form stores only the normal, so choose a stable tangent
+	// direction perpendicular to it. This keeps preview shading well-defined.
+	tangentBaseChoice := abs32(normal.Z()) < abs32(normal.Y())
+	if mgl32.FloatEqualThreshold(normal.X(), -1, 1e-6) ||
+		mgl32.FloatEqualThreshold(normal.X(), 1, 1e-6) {
+		tangentBaseChoice = !tangentBaseChoice
+	}
+	if tangentBaseChoice {
+		tangent = mgl32.Vec3{normal.Y(), -normal.X(), 0}.Normalize().Vec4(1)
+	} else {
+		tangent = mgl32.Vec3{normal.Z(), 0, -normal.X()}.Normalize().Vec4(-1)
+	}
+	bitangent = normal.Cross(tangent.Vec3())
+	return
+}

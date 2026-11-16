@@ -13,7 +13,15 @@ layout(shared, binding = 10) uniform LightingBlock {
 };
 
 float reconstructNormalZ(vec2 xy) {
-    return sqrt(1.0 - xy.x*xy.x - xy.y*xy.y);
+    return sqrt(max(0.0, 1.0 - dot(xy, xy)));
+}
+
+vec3 safeNormalizeLighting(vec3 value, vec3 fallbackValue) {
+    float lengthSquared = dot(value, value);
+    if (isnan(lengthSquared) || isinf(lengthSquared) || lengthSquared < 1e-12) {
+        return fallbackValue;
+    }
+    return value * inversesqrt(lengthSquared);
 }
 
 float recoverInverseZ(vec2 normal_xy) {
@@ -58,9 +66,14 @@ vec3 hsv2rgb(vec3 c)
 
 // base and detail should be unpacked already, and this will return an unpacked normal
 vec3 reorientNormalMaps(vec3 base, vec3 detail) {
-    vec3 t = base + vec3(0, 0, 1);
+    base = safeNormalizeLighting(base, vec3(0.0, 0.0, 1.0));
+    detail = safeNormalizeLighting(detail, vec3(0.0, 0.0, 1.0));
+    vec3 t = base + vec3(0.0, 0.0, 1.0);
     vec3 u = detail * vec3(-1, -1, 1);
-    return normalize(t*dot(t, u)/t.z - u);
+    if (abs(t.z) < 1e-6) {
+        return base;
+    }
+    return safeNormalizeLighting(t * dot(t, u) / t.z - u, base);
 }
 
 vec3 gamma(vec3 color, float value) {
@@ -69,13 +82,17 @@ vec3 gamma(vec3 color, float value) {
 
 // Normal is expected to be in tangent space
 vec4 calculateLighting(vec4 base_color, float roughness, float metallic, float specular, float ambient_occlusion, vec3 normal, float saturation, float contrast) {
+    normal = safeNormalizeLighting(normal, vec3(0.0, 0.0, 1.0));
+    roughness = clamp(roughness, 0.045, 1.0);
+    metallic = clamp(metallic, 0.0, 1.0);
+    ambient_occlusion = clamp(ambient_occlusion, 0.0, 1.0);
     vec3 ambient = ambient_color * ambient_occlusion;
-    vec3 lightDirection = normalize(fragTangentLightPosition - fragTangentFragmentPosition);
+    vec3 lightDirection = safeNormalizeLighting(fragTangentLightPosition - fragTangentFragmentPosition, vec3(0.0, 0.0, 1.0));
     vec3 diffuse = max(dot(normal, lightDirection), 0) * light_color;
 
     vec3 specularColor = mix(vec3(max(specular, 0.04)), base_color.rgb, metallic);
 
-    vec3 viewDirection = normalize(fragTangentViewPosition - fragTangentFragmentPosition);
+    vec3 viewDirection = safeNormalizeLighting(fragTangentViewPosition - fragTangentFragmentPosition, vec3(0.0, 0.0, 1.0));
     vec3 reflectDirection = reflect(-lightDirection, normal);
     vec3 halfwayDirection = normalize(lightDirection + viewDirection);
 

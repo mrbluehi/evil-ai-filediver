@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -37,6 +39,7 @@ type GameData struct {
 	*app.App
 	KnownFileNames            map[stingray.FileID]string
 	HashFileNames             map[stingray.FileID]string
+	InferredUnitNames         map[stingray.Hash]inferredUnitName
 	SortedSearchResultFileIDs []stingray.FileID
 
 	FilterExpr    *app.FilterExprProgram
@@ -50,12 +53,43 @@ func NewGameData(a *app.App) *GameData {
 	gd := &GameData{App: a}
 	gd.KnownFileNames = make(map[stingray.FileID]string)
 	gd.HashFileNames = make(map[stingray.FileID]string)
+	gd.InferredUnitNames = gd.inferUnitNames()
 	for id := range gd.DataDir.Files {
-		gd.KnownFileNames[id] = strings.ToLower(gd.LookupHash(id.Name) + "." + gd.LookupHash(id.Type))
+		name := gd.LookupHash(id.Name)
+		if id.Type == stingray.Sum("unit") {
+			name = gd.DisplayFileName(id)
+			if inferred, ok := gd.InferredUnitNames[id.Name]; ok {
+				// Include the evidence in the browser search index so users can
+				// find inferred names by their entity path, mesh name, or relation.
+				name += " " + inferred.Source
+			}
+		}
+		gd.KnownFileNames[id] = strings.ToLower(name + "." + gd.LookupHash(id.Type))
 		gd.HashFileNames[id] = id.Name.String() + "." + id.Type.String()
 	}
 	gd.UpdateSearchQuery("", nil, nil)
 	return gd
+}
+
+// DisplayFileName returns the real path when the hash database knows it.
+// Otherwise, for unit resources only, it uses a source-labeled descriptor
+// inferred from generated entity definitions or the unit's mesh-group names.
+// The raw hash remains available in the browser tooltip.
+func (gd *GameData) DisplayFileName(id stingray.FileID) string {
+	name := gd.LookupHash(id.Name)
+	if label, ok := gd.InferredUnitNames[id.Name]; id.Type == stingray.Sum("unit") && ok && label.Terrain {
+		return label.Display
+	}
+	if id.Type != stingray.Sum("unit") || name != id.Name.String() {
+		return name
+	}
+	if inferred, ok := gd.InferredUnitNames[id.Name]; ok {
+		if inferred.Vista && !strings.Contains(strings.ToLower(inferred.Display), "vista") {
+			return "vista shader: " + inferred.Display
+		}
+		return inferred.Display
+	}
+	return name
 }
 
 func (gd *GameData) UpdateSearchQuery(query string, allowedTypes map[stingray.Hash]struct{}, allowedArchives map[stingray.Hash]struct{}) {
@@ -125,9 +159,25 @@ func (gd *GameData) UpdateSearchQuery(query string, allowedTypes map[stingray.Ha
 			}
 		}
 	}
+	gd.SortSearchResults()
+}
+
+func (gd *GameData) SortSearchResults() {
 	slices.SortFunc(gd.SortedSearchResultFileIDs, func(a, b stingray.FileID) int {
 		return strings.Compare(gd.KnownFileNames[a], gd.KnownFileNames[b])
 	})
+}
+
+func (gd *GameData) fileSize(id stingray.FileID) uint64 {
+	fileInfos := gd.DataDir.Files[id]
+	if len(fileInfos) == 0 {
+		return 0
+	}
+	var size uint64
+	for _, dataType := range [...]stingray.DataType{stingray.DataMain, stingray.DataStream, stingray.DataGPU} {
+		size += uint64(fileInfos[0].Files[dataType].Size)
+	}
+	return size
 }
 
 func (gd *GameData) UpdateAssetOverrides(planetName string, city bool) {
@@ -251,6 +301,69 @@ type GameDataLoad struct {
 	Result   *GameData
 	Err      error
 	Done     bool
+}
+
+// UnitVersionScan stores the compared build's resource index while the
+// selected build remains loaded and serves as the comparison baseline.
+type UnitVersionScan struct {
+	sync.Mutex
+	Progress float32
+	Units    map[stingray.FileID]struct{}
+	DataDir  *stingray.DataDir
+	Path     string
+	Err      error
+	Done     bool
+}
+
+func (s *UnitVersionScan) GoScan(ctx context.Context, gameDir string) {
+	s.Lock()
+	if !s.Done && s.Path != "" {
+		s.Unlock()
+		return
+	}
+	s.Path = gameDir
+	s.Progress = 0
+	s.Units = nil
+	s.DataDir = nil
+	s.Err = nil
+	s.Done = false
+	s.Unlock()
+
+	go func() {
+		dataDirPath := gameDir
+		for _, candidate := range []string{gameDir, filepath.Join(gameDir, "contents"), filepath.Join(gameDir, "data")} {
+			if info, err := os.Stat(filepath.Join(candidate, "settings.ini")); err == nil && info.Mode().IsRegular() {
+				dataDirPath = candidate
+				break
+			}
+		}
+		dataDir, err := stingray.OpenDataDir(ctx, dataDirPath, func(current, total int) {
+			s.Lock()
+			if total > 0 {
+				s.Progress = float32(current+1) / float32(total)
+			}
+			s.Unlock()
+		})
+		var units map[stingray.FileID]struct{}
+		if err == nil {
+			if dataDir.IsHelldivers1 {
+				err = fmt.Errorf("the selected folder contains Helldivers 1 data; choose an older Helldivers 2 install")
+			} else {
+				units = make(map[stingray.FileID]struct{})
+				for id := range dataDir.Files {
+					if id.Type == stingray.Sum("unit") {
+						units[id] = struct{}{}
+					}
+				}
+			}
+		}
+		s.Lock()
+		s.Units, s.DataDir, s.Err, s.Done = units, dataDir, err, true
+		if err == nil {
+			s.Progress = 1
+		}
+		s.Unlock()
+	}()
 }
 
 func (gd *GameDataLoad) loadGameData(ctx context.Context, gameDir string) {

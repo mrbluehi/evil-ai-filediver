@@ -317,6 +317,20 @@ type CustomBlendFunction struct {
 	Postfix []uint32
 }
 
+// Evaluate evaluates a controller blend expression against the state's
+// animation-variable values. The player uses this to reproduce Stingray
+// blend-state weights without hard-coding any particular animation.
+func (f CustomBlendFunction) Evaluate(variables []float32) (float32, error) {
+	stack, err := f.ParsePostfix()
+	if err != nil {
+		return 0, err
+	}
+	if len(stack) != 1 {
+		return 0, fmt.Errorf("blend expression has %d results", len(stack))
+	}
+	return stack[0].Evaluate(variables)
+}
+
 func IsNaN(val uint32) bool {
 	return val&0x7f800000 == 0x7f800000 && val&0x007fffff != 0
 }
@@ -394,6 +408,86 @@ type postFixNode struct {
 	Operator CustomBlendFunctionType
 	Operands []postFixNode
 	Value    uint32
+}
+
+func blendClamp(value, low, high float32) float32 {
+	if low > high {
+		low, high = high, low
+	}
+	return min(max(value, low), high)
+}
+
+func blendRamp(value, low, center, high float32) float32 {
+	left := float32(0)
+	if center != low {
+		left = blendClamp((value-low)/(center-low), 0, 1)
+	}
+	right := float32(0)
+	if high != center {
+		right = blendClamp((value-center)/(high-center), 0, 1)
+	}
+	return left - right
+}
+
+func (n postFixNode) Evaluate(variables []float32) (float32, error) {
+	if n.Operator == CustomBlendFunctionType_None {
+		if IsNaN(n.Value) {
+			idx := getVariableIdx(n.Value)
+			if idx == 0xFFFFFFFF || int(idx) >= len(variables) {
+				return 0, fmt.Errorf("blend variable %d is out of range", idx)
+			}
+			return variables[idx], nil
+		}
+		return math.Float32frombits(n.Value), nil
+	}
+	args := make([]float32, len(n.Operands))
+	for i, operand := range n.Operands {
+		value, err := operand.Evaluate(variables)
+		if err != nil {
+			return 0, err
+		}
+		args[i] = value
+	}
+	switch n.Operator {
+	case CustomBlendFunctionType_Add:
+		return args[0] + args[1], nil
+	case CustomBlendFunctionType_Sub:
+		return args[0] - args[1], nil
+	case CustomBlendFunctionType_Mult:
+		return args[0] * args[1], nil
+	case CustomBlendFunctionType_Divide:
+		if args[1] == 0 {
+			return 0, nil
+		}
+		return args[0] / args[1], nil
+	case CustomBlendFunctionType_Negate:
+		return -args[0], nil
+	case CustomBlendFunctionType_UnaryPlus:
+		return args[0], nil
+	case CustomBlendFunctionType_Sin:
+		return float32(math.Sin(float64(args[0]))), nil
+	case CustomBlendFunctionType_Cos:
+		return float32(math.Cos(float64(args[0]))), nil
+	case CustomBlendFunctionType_Abs:
+		return float32(math.Abs(float64(args[0]))), nil
+	case CustomBlendFunctionType_Match:
+		return blendClamp(args[0]-args[1]-1, 0, 1) - blendClamp(args[0]-args[1], 0, 1), nil
+	case CustomBlendFunctionType_MatchRange:
+		return blendRamp(args[0], args[1], args[2], args[3]), nil
+	case CustomBlendFunctionType_Match2d:
+		x := blendClamp(args[0]-args[1]-1, 0, 1) - blendClamp(args[0]-args[1], 0, 1)
+		y := blendClamp(args[2]-args[3]-1, 0, 1) - blendClamp(args[2]-args[3], 0, 1)
+		return x * y, nil
+	case CustomBlendFunctionType_MatchRange2d:
+		return blendRamp(args[0], args[1], args[2], args[3]) * blendRamp(args[4], args[5], args[6], args[7]), nil
+	case CustomBlendFunctionType_Clamp:
+		return blendClamp(args[0], args[1], args[2]), nil
+	case CustomBlendFunctionType_Rand:
+		// A deterministic midpoint keeps editor playback stable across frames.
+		return (args[0] + args[1]) * 0.5, nil
+	default:
+		return 0, fmt.Errorf("unsupported blend operator %s", n.Operator)
+	}
 }
 
 func (n postFixNode) ToExpression(variables []string) string {

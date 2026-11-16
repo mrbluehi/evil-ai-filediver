@@ -179,4 +179,7 @@ void main() {
         fragColor = calculateLighting(vec4(base_color.xyz, 1.0), roughness, 0.0, micro_ao_spec * 0.1, ao, output_normal, 1.0, 1.0);
         fragColor.xyz += temp_emissive;
     }
+    if (fd_transparent != 0) {
+        fragColor.a = opacity;
+    }
 }

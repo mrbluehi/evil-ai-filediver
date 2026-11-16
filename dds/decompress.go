@@ -411,7 +411,7 @@ func DecompressUncompressedDXT10(buf []uint8, r io.Reader, width, height int, in
 			raw, err = binary.Append(raw, binary.LittleEndian, v)
 			return err
 		}
-	case DXGIFormatR8G8B8A8UNorm:
+	case DXGIFormatR8G8B8A8UNorm, DXGIFormatR8G8B8A8UNormSRGB:
 		if info.ColorModel != color.NRGBAModel {
 			return nil, errors.New("expected NRGBA model for R8G8B8A8UNorm")
 		}
@@ -426,7 +426,7 @@ func DecompressUncompressedDXT10(buf []uint8, r io.Reader, width, height int, in
 			}
 			return nil
 		}
-	case DXGIFormatB8G8R8A8UNorm:
+	case DXGIFormatB8G8R8A8UNorm, DXGIFormatB8G8R8A8UNormSRGB:
 		if info.ColorModel != color.NRGBAModel {
 			return nil, errors.New("expected NRGBA model for R8G8B8A8UNorm")
 		}
@@ -563,6 +563,51 @@ func DecompressDXT1(buf []uint8, r io.Reader, width, height int, info Info) ([]u
 					if cA[code] != 0 {
 						return nil, errors.New("expected alpha to be 0 in DXT 1 compressed image")
 					}
+				}
+			}
+		}
+	}
+	return raw, nil
+}
+
+func DecompressDXT3(buf []uint8, r io.Reader, width, height int, info Info) ([]uint8, error) {
+	if info.ColorModel != color.NRGBAModel {
+		return nil, errors.New("DXT3 compression expects NRGBA color model")
+	}
+
+	raw := make([]uint8, 0)
+	for y := 0; y < height; y += 4 {
+		for x := 0; x < width; x += 4 {
+			var block [16]uint8
+			if _, err := io.ReadFull(r, block[:]); err != nil {
+				return nil, err
+			}
+
+			var err error
+			raw, err = binary.Append(raw, binary.LittleEndian, block)
+			if err != nil {
+				return nil, err
+			}
+
+			alphaBits := binary.LittleEndian.Uint64(block[:8])
+			c0 := binary.LittleEndian.Uint16(block[8:10])
+			c1 := binary.LittleEndian.Uint16(block[10:12])
+			colorBits := binary.LittleEndian.Uint32(block[12:16])
+			cR, cG, cB, _ := calculateDXTColors(c0, c1, true)
+
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					if x+i >= width || y+j >= height {
+						continue
+					}
+					pixel := j*4 + i
+					idx := 4 * ((y+j)*width + x + i)
+					code := (colorBits >> (pixel * 2)) & 0x3
+					alpha := uint8((alphaBits >> (pixel * 4)) & 0xf)
+					buf[idx+0] = cR[code]
+					buf[idx+1] = cG[code]
+					buf[idx+2] = cB[code]
+					buf[idx+3] = alpha * 17
 				}
 			}
 		}

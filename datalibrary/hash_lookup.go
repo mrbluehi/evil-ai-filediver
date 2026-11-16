@@ -254,6 +254,13 @@ func parseHashLookup(r io.Reader) (map[uint64]stingray.Hash, error) {
 	if err := binary.Read(r, binary.LittleEndian, &hashLookup.HashMap5EntryCount); err != nil {
 		return nil, fmt.Errorf("read hash_map_05_entry_count %v", err)
 	}
+	// Older game builds can use a shorter hash_lookup layout. Validate the
+	// declared count against the remaining payload before allocating so a
+	// layout mismatch returns a normal parse error instead of exhausting RAM.
+	if sized, ok := r.(interface{ Len() int }); ok &&
+		uint64(hashLookup.HashMap5EntryCount) > uint64(sized.Len())/uint64(binary.Size(hashLookupMapEntry{})) {
+		return nil, fmt.Errorf("hash_map_05 entry count %d exceeds remaining payload (%d bytes)", hashLookup.HashMap5EntryCount, sized.Len())
+	}
 	hashLookup.HashMap5 = make([]hashLookupMapEntry, hashLookup.HashMap5EntryCount)
 	if err := binary.Read(r, binary.LittleEndian, &hashLookup.HashMap5); err != nil {
 		return nil, fmt.Errorf("read hash_map_05 %v", err)

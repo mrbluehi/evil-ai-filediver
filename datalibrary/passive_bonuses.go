@@ -97,7 +97,17 @@ func (passive *HelldiverCustomizationPassiveBonusSettings) ResolveDescription() 
 }
 
 func LoadPassiveBonusDefinitions(lookupHash HashLookup, lookupThinHash ThinHashLookup, lookupStrings StringsLookup) (map[uint32]HelldiverCustomizationPassiveBonusSettings, error) {
-	r := bytes.NewReader(customizationPassiveBonuses)
+	return LoadPassiveBonusDefinitionsFromData(customizationPassiveBonuses, lookupHash, lookupThinHash, lookupStrings, PassiveBonusSettingsSize)
+}
+
+// PassiveBonusSettingsSize is the live size of HelldiverCustomizationPassiveBonusSettings.
+// Older builds: 32 B (2024-02/03: no stat_modifiers), 48 B (2024-11: no trailing u32).
+const PassiveBonusSettingsSize = 56
+
+// LoadPassiveBonusDefinitionsFromData is LoadPassiveBonusDefinitions on a given (plaintext) table;
+// settingsSize is that build's size of HelldiverCustomizationPassiveBonusSettings.
+func LoadPassiveBonusDefinitionsFromData(data []byte, lookupHash HashLookup, lookupThinHash ThinHashLookup, lookupStrings StringsLookup, settingsSize int) (map[uint32]HelldiverCustomizationPassiveBonusSettings, error) {
+	r := bytes.NewReader(data)
 
 	definitions := make(map[uint32]HelldiverCustomizationPassiveBonusSettings)
 	var count uint32
@@ -117,8 +127,26 @@ func LoadPassiveBonusDefinitions(lookupHash HashLookup, lookupThinHash ThinHashL
 		base, _ := r.Seek(0, io.SeekCurrent)
 
 		var passive rawHelldiverCustomizationPassiveBonusSettings
-		if err := binary.Read(r, binary.LittleEndian, &passive); err != nil {
-			return nil, fmt.Errorf("reading item %v: %v", i, err)
+		if settingsSize >= 48 {
+			if err := binary.Read(r, binary.LittleEndian, &passive); err != nil {
+				return nil, fmt.Errorf("reading item %v: %v", i, err)
+			}
+		} else { // 32 B layout: passive_bonus, name_loc, icon, modifiers[]
+			var old struct {
+				PassiveBonus          uint32
+				Name                  uint32
+				Icon                  stingray.Hash
+				PassiveModifierOffset int64
+				PassiveModifierCount  int64
+			}
+			if err := binary.Read(r, binary.LittleEndian, &old); err != nil {
+				return nil, fmt.Errorf("reading item %v: %v", i, err)
+			}
+			passive = rawHelldiverCustomizationPassiveBonusSettings{PassiveBonus: old.PassiveBonus, Name: old.Name, Icon: old.Icon,
+				PassiveModifierOffset: old.PassiveModifierOffset, PassiveModifierCount: old.PassiveModifierCount, StatModifierOffset: -1}
+		}
+		if passive.StatModifierCount < 0 || passive.StatModifierOffset < 0 {
+			passive.StatModifierCount = 0
 		}
 
 		r.Seek(base+passive.PassiveModifierOffset, io.SeekStart)
@@ -137,10 +165,12 @@ func LoadPassiveBonusDefinitions(lookupHash HashLookup, lookupThinHash ThinHashL
 			})
 		}
 
-		r.Seek(base+passive.StatModifierOffset, io.SeekStart)
 		var statModifiers []HelldiverCustomizationStatModifier = make([]HelldiverCustomizationStatModifier, passive.StatModifierCount)
-		if err := binary.Read(r, binary.LittleEndian, statModifiers); err != nil {
-			return nil, fmt.Errorf("reading statModifiers at address %x: %v", base+passive.StatModifierOffset, err)
+		if passive.StatModifierCount > 0 {
+			r.Seek(base+passive.StatModifierOffset, io.SeekStart)
+			if err := binary.Read(r, binary.LittleEndian, statModifiers); err != nil {
+				return nil, fmt.Errorf("reading statModifiers at address %x: %v", base+passive.StatModifierOffset, err)
+			}
 		}
 
 		definitions[passive.PassiveBonus] = HelldiverCustomizationPassiveBonusSettings{

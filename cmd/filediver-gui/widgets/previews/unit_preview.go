@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/AllenDang/cimgui-go/imgui"
@@ -53,15 +54,28 @@ var LEVEL = stingray.Sum("level")
 var MATERIAL = stingray.Sum("material")
 
 type unitPreviewObject struct {
-	vao       uint32   // vertex array object
-	ibos      []uint32 // index buffer objects
-	vbo       uint32   // vertex buffer object
-	imbo      uint32   // instance matrices buffer object
-	materials []preview_mats.Material
-	wireframe preview_mats.Material
-	normalVis preview_mats.Material
-	matrix    mgl32.Mat4
-	name      stingray.Hash
+	vao                uint32   // vertex array object
+	ibos               []uint32 // index buffer objects
+	vbo                uint32   // vertex buffer object
+	imbo               uint32   // instance matrices buffer object
+	materials          []preview_mats.Material
+	wireframe          preview_mats.Material
+	normalVis          preview_mats.Material
+	matrix             mgl32.Mat4
+	bindMatrix         mgl32.Mat4
+	boneIndex          int
+	skeletonMapIndex   int
+	basePositions      [][3]float32
+	baseNormals        [][3]float32
+	baseBoneIndices    [][4]uint8
+	baseBoneWeights    [][4]float32
+	normalsOffset      int
+	animAttribVBO      uint32
+	animSkinBuffer     uint32
+	animNormalBuffer   uint32
+	animSkinMatrices   []mgl32.Mat4
+	animNormalMatrices []mgl32.Mat4
+	name               stingray.Hash
 
 	numVertices        int32
 	numIndices         []int32
@@ -93,8 +107,8 @@ func (obj *unitPreviewObject) genObjects(textures bool, numIbos int32) {
 
 func (obj unitPreviewObject) deleteObjects(ml *preview_mats.MaterialManager) {
 	gl.DeleteVertexArrays(1, &obj.vao)
-	gl.DeleteBuffers(1, &obj.vbo)
-	gl.DeleteBuffers(1, &obj.imbo)
+	bufferIDs := []uint32{obj.vbo, obj.imbo, obj.animAttribVBO, obj.animSkinBuffer, obj.animNormalBuffer}
+	gl.DeleteBuffers(int32(len(bufferIDs)), &bufferIDs[0])
 	if len(obj.ibos) > 0 {
 		gl.DeleteBuffers(int32(len(obj.ibos)), &obj.ibos[0])
 	}
@@ -106,12 +120,40 @@ func (obj unitPreviewObject) deleteObjects(ml *preview_mats.MaterialManager) {
 }
 
 type unitPreviewNode struct {
-	name     string
-	shown    bool
-	matrix   mgl32.Mat4
-	children []stingray.FileID
-	parent   stingray.Hash
+	name            string
+	shown           bool
+	overlayKind     SceneOverlayKind
+	matrix          mgl32.Mat4
+	children        []stingray.FileID
+	parent          stingray.Hash
+	mountParentUnit stingray.FileID
+	mountBoneIndex  int
 }
+
+// SceneOverlayKind identifies level helper geometry that is useful to inspect
+// but can obscure the placed environment when rendered as opaque solids.
+type SceneOverlayKind uint8
+
+const (
+	SceneOverlayNone SceneOverlayKind = iota
+	SceneOverlayVolumes
+	SceneOverlayAudioVolumes
+	SceneOverlayAvoidanceVolumes
+	SceneOverlayRendererHelpers
+	SceneOverlayDecalBoxes
+)
+
+var tutorialTriggerUnitHash = stingray.Sum("content/env_shared/assets/tutorial_trigger_area/tutorial_trigger_area")
+var killVolumeUnitHash = stingray.Sum("content/env_shared/assets/kill_volume/kill_volume")
+var landingZoneMaterialHash = stingray.Sum("content/markers/m_landing_zone")
+var reverbVolumeMaterialHash = stingray.Sum("content/env_shared/assets/reverb_volume/m_reverb_volume")
+var wwiseAudioVolumeUnitHash = stingray.Sum("content/wwise/wwise_audio_volume")
+var wwiseAudioPortalUnitHash = stingray.Sum("content/wwise/wwise_audio_portal")
+
+const rendererHelperUnitPrefix = "core/stingray_renderer/helper_units/"
+
+var decalBoxUnitHash = stingray.Sum("core/stingray_renderer/helper_units/decals/decal_box")
+var decalBoxLongRangeUnitHash = stingray.Sum("core/stingray_renderer/helper_units/decals/decal_box_long_range")
 
 var armorCamos = []enum.CamouflageType{
 	enum.CamouflageType_Default,
@@ -125,7 +167,12 @@ type UnitPreviewState struct {
 	fb *widgets.GLViewState
 	ml *preview_mats.MaterialManager
 
-	getResource GetResourceFunc
+	captureMode     bool
+	hideLevelGround bool
+	isHelldivers1   bool
+
+	getResource        GetResourceFunc
+	resolveHD1Material ResolveHD1MaterialFunc
 
 	nodes    map[stingray.Hash]unitPreviewNode
 	root     unitPreviewNode
@@ -139,14 +186,41 @@ type UnitPreviewState struct {
 	objectsShown        map[stingray.FileID]map[string]bool
 	objectsShownDefault map[stingray.FileID]map[string]bool
 	objectsSelected     map[stingray.FileID]map[string]bool
+	sceneOverlayVisible map[SceneOverlayKind]bool
+	sceneOverlayKinds   map[stingray.FileID]SceneOverlayKind
 
 	treeViewShown bool
 	treeViewDrawn bool
 
 	boundingBoxMaterial preview_mats.Material
 
-	skeletons     map[stingray.FileID]unitPreviewObject
-	boundingBoxes map[stingray.FileID]map[string]unitPreviewObject
+	skeletons       map[stingray.FileID]unitPreviewObject
+	boundingBoxes   map[stingray.FileID]map[string]unitPreviewObject
+	unitInfos       map[stingray.FileID]*unit.Info
+	visibilityMasks map[stingray.FileID]*unitVisibilityMasks
+
+	rootHealthComponent   *datalib.HealthComponent
+	rootHealthLoaded      bool
+	rootHealthLoadError   string
+	damageModelSelection  damageModelMode
+	damageOverlayBoxes    []damageOverlayBox
+	damageOverlayVolumes  []damageOverlayVolume
+	damageOverlayUnit     stingray.FileID
+	damageOverlayLoaded   bool
+	damageOverlayError    string
+	showPhysicsHitboxes   bool
+	showDamageBoxes       bool
+	showDamageReadout     bool
+	damageBoxRenderer     unitPreviewObject
+	damageSphereRenderer  unitPreviewObject
+	damageCapsuleRenderer unitPreviewObject
+	damageBoxRenderReady  bool
+	damageBoxScratch      []float32
+
+	mountedAttachmentsEnabled bool
+	mountedAttachmentsLoaded  bool
+	mountedAttachmentNodes    []stingray.Hash
+	mountedAttachmentWarnings []string
 
 	vfov         float32
 	modelPos     mgl32.Vec4
@@ -171,7 +245,16 @@ type UnitPreviewState struct {
 
 	fibonacciNormalLut [][4]float32
 
-	skeletonPositions map[stingray.FileID][]mgl32.Vec3
+	skeletonPositions    map[stingray.FileID][]mgl32.Vec3
+	skeletonBoneIndices  map[stingray.FileID][]int
+	rootUnitInfo         *unit.Info
+	animationBoneMap     []int
+	animationLocals      []mgl32.Mat4
+	animationGlobals     []mgl32.Mat4
+	animationRootBone    int
+	animationPlayer      animationPlayback
+	animationEnabled     bool
+	animationResourceIDs []stingray.FileID
 
 	maxViewDistance float32
 
@@ -191,6 +274,7 @@ type UnitPreviewState struct {
 	hoveredMeshListItem int32
 
 	showWireframe             bool
+	thumbnailFlat             bool
 	wireframeColor            mgl32.Vec4
 	showAABB                  bool
 	aabbColor                 mgl32.Vec4
@@ -200,15 +284,23 @@ type UnitPreviewState struct {
 	visualizeTangentBitangent int32 // 1 or 0
 	autoZoomEnabled           bool
 	doAutoZoomNextFrame       bool
+	lodLevel                  int
+	maxLODLevel               int
 
 	armorSets                map[stingray.Hash]datalib.ArmorSet
 	selectedCamo             enum.CamouflageType
 	selectedSet              int64
 	getSelectedArchives      func() []stingray.Hash
 	previousSelectedArchives []stingray.Hash
-	archivesModified         bool
-	lookupThinHash           func(stingray.ThinHash) string
-	lookupHash               func(stingray.Hash) string
+	// Archives of armor kits chosen in the Armor Set window: their LUTs apply to the shown
+	// pieces as if the archives were selected in the Archive Filter.
+	armorContextArchives []stingray.Hash
+	armorThumbnailOnly   bool
+	armorAnimationMode   bool
+	armorBoneMap         map[stingray.FileID][]int
+	archivesModified     bool
+	lookupThinHash       func(stingray.ThinHash) string
+	lookupHash           func(stingray.Hash) string
 }
 
 func NewUnitPreview(
@@ -217,10 +309,21 @@ func NewUnitPreview(
 	ArmorParams ExtractorArmorParameters,
 	lookupHash func(stingray.Hash) string,
 	lookupThinHash func(stingray.ThinHash) string,
+	isHelldivers1 bool,
 ) (*UnitPreviewState, error) {
 	var err error
 
 	pv := &UnitPreviewState{}
+	pv.animationPlayer.reset()
+	pv.isHelldivers1 = isHelldivers1
+	pv.sceneOverlayVisible = map[SceneOverlayKind]bool{
+		SceneOverlayVolumes:          true,
+		SceneOverlayAudioVolumes:     true,
+		SceneOverlayAvoidanceVolumes: false,
+		SceneOverlayRendererHelpers:  false,
+		SceneOverlayDecalBoxes:       false,
+	}
+	pv.sceneOverlayKinds = make(map[stingray.FileID]SceneOverlayKind)
 
 	pv.fb, err = widgets.NewGLView()
 	if err != nil {
@@ -237,6 +340,9 @@ func NewUnitPreview(
 	pv.armorSets = ArmorParams.ArmorSets
 	pv.selectedCamo = enum.CamouflageType_None
 	pv.getSelectedArchives = ArmorParams.SelectedArchives
+	if pv.getSelectedArchives == nil {
+		pv.getSelectedArchives = func() []stingray.Hash { return nil }
+	}
 	pv.getOverride = getOverride
 	pv.getResource = getResource
 
@@ -273,11 +379,282 @@ func (pv *UnitPreviewState) Delete() {
 			pv.boundingBoxes[hash][name].deleteObjects(pv.ml)
 		}
 	}
+	if pv.damageBoxRenderReady {
+		pv.damageBoxRenderer.deleteObjects(pv.ml)
+		pv.damageSphereRenderer.deleteObjects(pv.ml)
+		pv.damageCapsuleRenderer.deleteObjects(pv.ml)
+	}
 	pv.ml.Delete()
 }
 
+type UnitCamera struct {
+	Rotation mgl32.Vec2
+	Distance float32
+	ModelPos mgl32.Vec4
+}
+
+func DefaultUnitCamera() UnitCamera {
+	return UnitCamera{
+		Rotation: mgl32.Vec2{math.Pi, 0},
+		Distance: 25,
+		ModelPos: mgl32.Vec4{0, 0, 0, 1},
+	}
+}
+
+func (pv *UnitPreviewState) Camera() UnitCamera {
+	return UnitCamera{Rotation: pv.viewRotation, Distance: pv.viewDistance, ModelPos: pv.modelPos}
+}
+
+func (pv *UnitPreviewState) SetCamera(camera UnitCamera) {
+	pv.viewRotation = camera.Rotation
+	pv.viewDistance = camera.Distance
+	pv.modelPos = camera.ModelPos
+	pv.animOrigViewDistance = camera.Distance
+	pv.animOrigViewRotation = camera.Rotation
+	pv.animOrigModelPos = camera.ModelPos
+	pv.animTime = -1
+	pv.doAutoZoomNextFrame = false
+}
+
+func (pv *UnitPreviewState) HasLoadedUnit() bool {
+	return len(pv.objects) > 0
+}
+
+func (pv *UnitPreviewState) udimsShownFor(fileID stingray.FileID) *int32 {
+	if state := pv.visibilityMasks[fileID]; state != nil {
+		return &state.shown[0]
+	}
+	return &pv.udimsShown[0]
+}
+
+func (pv *UnitPreviewState) MaterialsReady() bool {
+	for _, objects := range pv.objects {
+		for _, object := range objects {
+			for _, material := range object.materials {
+				if !pv.ml.MaterialTexturesReady(material) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func (pv *UnitPreviewState) SetAnimationEnabled(enabled bool) {
+	pv.animationEnabled = enabled
+}
+
+func (pv *UnitPreviewState) SetAnimationResources(ids []stingray.FileID) {
+	pv.animationResourceIDs = append(pv.animationResourceIDs[:0], ids...)
+}
+
+func (pv *UnitPreviewState) ReleaseLoadedUnit() {
+	for fileID, objects := range pv.objects {
+		for name, object := range objects {
+			object.deleteObjects(pv.ml)
+			if boundingBox, ok := pv.boundingBoxes[fileID][name]; ok {
+				boundingBox.deleteObjects(pv.ml)
+			}
+		}
+		if skeleton, ok := pv.skeletons[fileID]; ok {
+			skeleton.deleteObjects(pv.ml)
+		}
+	}
+	clear(pv.nodes)
+	clear(pv.objects)
+	clear(pv.objectsShown)
+	clear(pv.objectsShownDefault)
+	clear(pv.objectsSelected)
+	clear(pv.objectOverrides)
+	clear(pv.boundingBoxes)
+	clear(pv.skeletons)
+	clear(pv.meshPositions)
+	clear(pv.meshNormals)
+	clear(pv.aabb)
+	clear(pv.aabbMat)
+	clear(pv.skeletonPositions)
+	clear(pv.skeletonBoneIndices)
+	clear(pv.unitInfos)
+	clear(pv.visibilityMasks)
+	clear(pv.sceneOverlayKinds)
+	pv.rootHealthComponent = nil
+	pv.rootHealthLoaded = false
+	pv.rootHealthLoadError = ""
+	pv.damageModelSelection = damageModelIntact
+	pv.damageOverlayBoxes = nil
+	pv.damageOverlayVolumes = nil
+	pv.damageOverlayUnit = stingray.FileID{}
+	pv.damageOverlayLoaded = false
+	pv.damageOverlayError = ""
+	pv.damageBoxScratch = pv.damageBoxScratch[:0]
+	pv.mountedAttachmentsLoaded = false
+	pv.mountedAttachmentNodes = nil
+	pv.mountedAttachmentWarnings = nil
+	pv.rootUnitInfo = nil
+	pv.animationBoneMap = nil
+	pv.animationLocals = nil
+	pv.animationGlobals = nil
+	pv.animationRootBone = -1
+	pv.animationPlayer.reset()
+	pv.root = unitPreviewNode{}
+	pv.rootHash = stingray.FileID{}
+	pv.maxViewDistance = 0
+	pv.doAutoZoomNextFrame = false
+	pv.animTime = -1
+	pv.ml.ClearTextureData()
+	pv.ml.Sweep()
+}
+
+// SetHideLevelGround controls the generated terrain mesh in loaded and future
+// level previews. It leaves every other scene object untouched.
+func (pv *UnitPreviewState) SetHideLevelGround(hidden bool) {
+	if pv.hideLevelGround == hidden {
+		return
+	}
+	pv.hideLevelGround = hidden
+	for fileID, info := range pv.unitInfos {
+		if len(info.TerrainInfos) == 0 {
+			continue
+		}
+		for name := range pv.objectsShownDefault[fileID] {
+			if name != "terrain" {
+				continue
+			}
+			shown := !hidden
+			pv.objectsShownDefault[fileID][name] = shown
+			pv.objectsShown[fileID][name] = shown
+			pv.objectsSelected[fileID][name] = shown
+		}
+	}
+}
+
+func (pv *UnitPreviewState) SceneOverlayVisible(kind SceneOverlayKind) bool {
+	if pv.sceneOverlayVisible == nil {
+		return true
+	}
+	return pv.sceneOverlayVisible[kind]
+}
+
+func (pv *UnitPreviewState) SetSceneOverlayVisible(kind SceneOverlayKind, visible bool) {
+	if kind == SceneOverlayNone {
+		return
+	}
+	if pv.sceneOverlayVisible == nil {
+		pv.sceneOverlayVisible = make(map[SceneOverlayKind]bool)
+	}
+	pv.sceneOverlayVisible[kind] = visible
+}
+
+func (pv *UnitPreviewState) setNodeSceneOverlay(nodeHash stingray.Hash, unitID stingray.FileID) {
+	node, ok := pv.nodes[nodeHash]
+	if !ok {
+		return
+	}
+	node.overlayKind = pv.sceneOverlayKind(unitID, node.name)
+	pv.nodes[nodeHash] = node
+	if node.overlayKind == SceneOverlayNone {
+		return
+	}
+	pv.sceneOverlayKinds[unitID] = node.overlayKind
+	// Several placed helper instances use unnamed UUID nodes after the first
+	// named occurrence. Cache the kind by resource and update those nodes too.
+	for hash, sibling := range pv.nodes {
+		for _, child := range sibling.children {
+			if child == unitID {
+				sibling.overlayKind = node.overlayKind
+				pv.nodes[hash] = sibling
+				break
+			}
+		}
+	}
+}
+
+func (pv *UnitPreviewState) sceneOverlayKind(unitID stingray.FileID, placedName string) SceneOverlayKind {
+	if unitID.Type != UNIT {
+		return SceneOverlayNone
+	}
+	if kind, ok := pv.sceneOverlayKinds[unitID]; ok {
+		return kind
+	}
+	placedName = strings.ToLower(strings.ReplaceAll(placedName, "\\", "/"))
+	if strings.Contains(placedName, "wwise_audio_volume") || strings.Contains(placedName, "wwise_audio_portal") || strings.Contains(placedName, "reverb_volume") {
+		return SceneOverlayAudioVolumes
+	}
+	if strings.Contains(placedName, "hellpod_avoidance_volume") || strings.Contains(placedName, "avoidance_volume") {
+		return SceneOverlayAvoidanceVolumes
+	}
+	if strings.Contains(placedName, "decal_box") {
+		return SceneOverlayDecalBoxes
+	}
+	if strings.Contains(placedName, "trigger") || strings.Contains(placedName, "volume") {
+		return SceneOverlayVolumes
+	}
+	// Use resource hashes as well as names: game hash dictionaries vary between
+	// builds, and unresolved helper names previously let these boxes render.
+	if unitID.Name == decalBoxUnitHash || unitID.Name == decalBoxLongRangeUnitHash {
+		return SceneOverlayDecalBoxes
+	}
+	if unitID.Name == wwiseAudioVolumeUnitHash || unitID.Name == wwiseAudioPortalUnitHash {
+		return SceneOverlayAudioVolumes
+	}
+	if pv.lookupHash != nil {
+		name := strings.ToLower(strings.ReplaceAll(pv.lookupHash(unitID.Name), "\\", "/"))
+		if strings.Contains(name, "hellpod_avoidance_volume") || strings.Contains(name, "avoidance_volume") {
+			return SceneOverlayAvoidanceVolumes
+		}
+		if strings.HasPrefix(name, "core/stingray_renderer/helper_units/decals/decal_box") {
+			return SceneOverlayDecalBoxes
+		}
+		if strings.Contains(name, "content/wwise/wwise_audio_volume") || strings.Contains(name, "content/wwise/wwise_audio_portal") || strings.Contains(name, "reverb_volume") {
+			return SceneOverlayAudioVolumes
+		}
+		if strings.HasPrefix(name, rendererHelperUnitPrefix) {
+			return SceneOverlayRendererHelpers
+		}
+		if strings.Contains(name, "trigger") || strings.Contains(name, "volume") {
+			return SceneOverlayVolumes
+		}
+	}
+	if unitID.Name == tutorialTriggerUnitHash || unitID.Name == killVolumeUnitHash {
+		return SceneOverlayVolumes
+	}
+	// Placed instances can use aliases whose resource name does not match the
+	// source unit. The shared marker materials identify those volume helpers.
+	for _, object := range pv.objects[unitID] {
+		for _, objectMaterial := range object.materials {
+			materialID := objectMaterial.ID()
+			if materialID.Name == reverbVolumeMaterialHash {
+				return SceneOverlayAudioVolumes
+			}
+			if materialID.Name == landingZoneMaterialHash {
+				return SceneOverlayVolumes
+			}
+			if pv.lookupHash != nil {
+				materialName := strings.ToLower(pv.lookupHash(materialID.Name))
+				if strings.Contains(materialName, "m_reverb_volume") {
+					return SceneOverlayAudioVolumes
+				}
+				if strings.Contains(materialName, "m_landing_zone") {
+					return SceneOverlayVolumes
+				}
+			}
+		}
+	}
+	return SceneOverlayNone
+}
+
+func sceneOverlayOpacity(kind SceneOverlayKind) float32 {
+	if kind == SceneOverlayVolumes || kind == SceneOverlayAudioVolumes || kind == SceneOverlayAvoidanceVolumes {
+		return 0.30
+	}
+	if kind == SceneOverlayRendererHelpers {
+		return 0.25
+	}
+	return 1
+}
+
 func (pv *UnitPreviewState) UpdateAssetOverrides(entityInfo *entity.Entity) {
-	pv.ml.SetEntity(entityInfo)
+	entityChanged := pv.ml.SetEntity(entityInfo)
 	pv.ml.ClearTextureData()
 	for fileID := range pv.objects {
 		if fileID.Type.Value == 0x0 {
@@ -353,13 +730,41 @@ func (pv *UnitPreviewState) UpdateAssetOverrides(entityInfo *entity.Entity) {
 	}
 
 	pv.ml.UpdateAssetGradingLut()
+	if entityChanged {
+		pv.refreshRockAssetGrading()
+	}
 
 	if err := pv.finalizeObjectMaterials(); err != nil {
 		fmt.Printf("finalizing override materials: %v\n", err)
 	}
 }
 
-var objectRegex = regexp.MustCompile("^(g_)?(\\w*?)_?(cull|shadow|rubble|rubble_shadow|debris|shadowmesh|c)?_?(\\d*)?_?(LOD\\d)?$")
+// SetEntityInfo supplies the game color-grading context before a scene is
+// loaded, so materials such as rocks can use the same biome palette as the game.
+func (pv *UnitPreviewState) SetEntityInfo(entityInfo *entity.Entity) {
+	if pv.ml == nil || !pv.ml.SetEntity(entityInfo) || len(pv.objects) == 0 {
+		return
+	}
+	if err := pv.ml.UpdateAssetGradingLut(); err != nil {
+		fmt.Printf("updating preview color grading LUT: %v\n", err)
+		return
+	}
+	pv.refreshRockAssetGrading()
+}
+
+func (pv *UnitPreviewState) refreshRockAssetGrading() {
+	for _, meshes := range pv.objects {
+		for _, object := range meshes {
+			for _, objectMaterial := range object.materials {
+				pv.ml.RefreshAssetGrading(objectMaterial)
+			}
+		}
+	}
+}
+
+// Keep numeric suffixes in object names: Hive Lord's body0/body1 are separate
+// visible segments, not LOD numbers. Only explicit LODn suffixes are LODs.
+var objectRegex = regexp.MustCompile("^(g_)?(\\w*?)_?(cull|shadow|rubble|rubble_shadow|debris|shadowmesh|c)?_?(LOD\\d)?$")
 
 // These hashes aren't actually known, so I'm shimming them so previews work
 var vistaMeshes = map[stingray.ThinHash]string{
@@ -391,31 +796,32 @@ func (pv *UnitPreviewState) loadMeshes(meshInfos []unit.MeshInfo, meshLayouts []
 		if object == nil || object[2] == "" {
 			continue
 		}
-		fmt.Printf("Found object:\n    name: %v\n    shadow/rubble: %v\n    index: %v\n    LOD: %v\n", object[2], object[3], object[4], object[5])
+		fmt.Printf("Found object:\n    name: %v\n    shadow/rubble: %v\n    index: %v\n    LOD: %v\n", object[2], object[3], object[4], object[4])
 		// rubble/shadow/rubble_shadow
 		objectName := object[2]
 		if object[3] != "" {
 			objectName += "_" + object[3]
 		}
-		if object[4] != "" {
-			objectName += "_" + object[4]
+		if lod := strings.TrimPrefix(object[4], "LOD"); lod != "" {
+			if level, err := strconv.Atoi(lod); err == nil {
+				pv.maxLODLevel = max(pv.maxLODLevel, level)
+			}
 		}
 		foundObject, ok := objects[objectName]
 		if !ok {
 			foundObject = make(map[string]int)
 		}
-		foundObject[object[5]] = idx
+		foundObject[object[4]] = idx
 		objects[objectName] = foundObject
 	}
 
 	for object, lods := range objects {
-		sortedLods := slices.Sorted(maps.Keys(lods))
-		chosenLod := sortedLods[0]
+		chosenLod, chosenIdx := chooseMeshLOD(lods, pv.lodLevel)
 		if chosenLod == "" {
 			chosenLod = "<base-mesh>"
 		}
 		fmt.Printf("choosing %v as min lod for object %v\n", chosenLod, object)
-		minLods[object] = lods[sortedLods[0]]
+		minLods[object] = chosenIdx
 	}
 
 	meshesToLoad := make([]uint32, 0)
@@ -438,14 +844,18 @@ func (pv *UnitPreviewState) loadMeshes(meshInfos []unit.MeshInfo, meshLayouts []
 		meshesToLoad = append(meshesToLoad, uint32(highestDetailIdx))
 	} else {
 		for object, idx := range minLods {
+			isVisibleRubble := strings.HasPrefix(object, "rubble") &&
+				!strings.Contains(object, "shadow") &&
+				!strings.Contains(object, "cull") &&
+				!strings.Contains(object, "coll")
 			if !strings.HasPrefix(object, "0x") &&
 				(strings.Contains(object, "shadow") ||
 					strings.HasPrefix(object, "c_") ||
-					strings.HasSuffix(object, "_c") ||
+					(!isVisibleRubble && strings.HasSuffix(object, "_c")) ||
 					strings.Contains(object, "cull") ||
 					strings.Contains(object, "coll") ||
-					(strings.HasSuffix(object, "rubble") && !strings.Contains(object, "rock")) ||
-					(strings.HasPrefix(object, "rubble") && !strings.Contains(object, "rock")) ||
+					(!isVisibleRubble && strings.HasSuffix(object, "rubble") && !strings.Contains(object, "rock")) ||
+					(!isVisibleRubble && strings.HasPrefix(object, "rubble") && !strings.Contains(object, "rock")) ||
 					strings.HasSuffix(object, "debris") ||
 					object == "ai_blocker" ||
 					object == "v" ||
@@ -453,6 +863,35 @@ func (pv *UnitPreviewState) loadMeshes(meshInfos []unit.MeshInfo, meshLayouts []
 				shownDefault[object] = false
 			}
 			meshesToLoad = append(meshesToLoad, uint32(idx))
+		}
+		// A resolved collision or shadow name alone does not identify the
+		// visible mesh. Some armor pieces have unnamed LODs and a named
+		// culling mesh; select the largest unresolved mesh in that case.
+		visible := false
+		for name := range minLods {
+			if shown, ok := shownDefault[name]; !ok || shown {
+				visible = true
+				break
+			}
+		}
+		if !visible {
+			best, bestCount := -1, -1
+			for i, info := range meshInfos {
+				if !strings.HasPrefix(pv.lookupThinHash(info.Header.MeshName), "0x") || info.Header.MeshType == unit.MeshTypeUnknown00 {
+					continue
+				}
+				count := 0
+				for _, group := range info.Groups {
+					count += int(group.NumIndices)
+				}
+				if count > bestCount {
+					best, bestCount = i, count
+				}
+			}
+			if best >= 0 {
+				minLods["unresolved highest-detail"] = best
+				meshesToLoad = append(meshesToLoad, uint32(best))
+			}
 		}
 	}
 
@@ -476,6 +915,36 @@ func (pv *UnitPreviewState) loadMeshes(meshInfos []unit.MeshInfo, meshLayouts []
 		}
 	}
 	return meshes, shownDefault, nil
+}
+
+func chooseMeshLOD(lods map[string]int, requested int) (string, int) {
+	key := fmt.Sprintf("LOD%d", requested)
+	if idx, ok := lods[key]; ok {
+		return key, idx
+	}
+	bestDistance := int(^uint(0) >> 1)
+	bestLevel := int(^uint(0) >> 1)
+	bestKey := ""
+	bestIdx := -1
+	for candidate, idx := range lods {
+		level := 0
+		if candidate != "" {
+			parsedLevel, err := strconv.Atoi(strings.TrimPrefix(candidate, "LOD"))
+			if err != nil {
+				continue
+			}
+			level = parsedLevel
+		}
+		distance := level - requested
+		if distance < 0 {
+			distance = -distance
+		}
+		preferExplicit := distance == bestDistance && level == bestLevel && candidate != "" && bestKey == ""
+		if distance < bestDistance || distance == bestDistance && level < bestLevel || preferExplicit {
+			bestDistance, bestLevel, bestKey, bestIdx = distance, level, candidate, idx
+		}
+	}
+	return bestKey, bestIdx
 }
 
 func overrideLUTMaterial(mat *material.Material, armorInfo *datalib.UnitData, camo enum.CamouflageType) {
@@ -532,12 +1001,18 @@ func overrideLUTMaterial(mat *material.Material, armorInfo *datalib.UnitData, ca
 }
 
 func (pv *UnitPreviewState) finalizeObjectMaterials() error {
-	pv.ml.Wait()
-	for objectHash := range pv.objects {
-		for mesh := range pv.objects[objectHash] {
+	remainingUploads := 4
+	fileIDs := slices.SortedFunc(maps.Keys(pv.objects), func(a, b stingray.FileID) int {
+		return stingray.Hash.Cmp(a.Name, b.Name)
+	})
+	for _, objectHash := range fileIDs {
+		for _, mesh := range slices.Sorted(maps.Keys(pv.objects[objectHash])) {
 			for group := range pv.objects[objectHash][mesh].materials {
+				if remainingUploads <= 0 {
+					return nil
+				}
 				material := pv.objects[objectHash][mesh].materials[group]
-				if err := pv.ml.FinalizeMaterialTextures(material); err != nil {
+				if err := pv.ml.FinalizeMaterialTexturesWithBudget(material, &remainingUploads); err != nil {
 					return err
 				}
 				pv.objects[objectHash][mesh].materials[group] = material
@@ -562,11 +1037,44 @@ func loadMaterialInfo(getResource GetResourceFunc, materialID stingray.FileID) (
 }
 
 func (pv *UnitPreviewState) getArmorInfo(name stingray.Hash) (armorInfo *datalib.UnitData) {
-	for _, set := range pv.armorSets {
-		if !slices.Contains(pv.getSelectedArchives(), set.Archive) {
+	selected := pv.getSelectedArchives()
+	// The explicitly assembled kit must take precedence over archive filters,
+	// especially when several capes share the same generic mesh.
+	if name == stingray.Sum("content/fac_helldivers/capes/medium_cape") {
+		for _, archive := range pv.armorContextArchives {
+			set, ok := pv.armorSets[archive]
+			if !ok || set.Type != datalib.KitCape {
+				continue
+			}
+			if value, ok := set.UnitMetadata[name]; ok {
+				return &value
+			}
+			if value, ok := set.UnitMetadata[stingray.Hash{}]; ok {
+				return &value
+			}
+		}
+	}
+	for _, archive := range pv.armorContextArchives {
+		set, ok := pv.armorSets[archive]
+		if !ok {
 			continue
 		}
 		value, contains := set.UnitMetadata[name]
+		if !contains && set.Type == datalib.KitCape && name == stingray.Sum("content/fac_helldivers/capes/medium_cape") {
+			value, contains = set.UnitMetadata[stingray.Hash{}]
+		}
+		if contains {
+			return &value
+		}
+	}
+	for _, set := range pv.armorSets {
+		if !slices.Contains(selected, set.Archive) {
+			continue
+		}
+		value, contains := set.UnitMetadata[name]
+		if !contains && set.Type == datalib.KitCape && name == stingray.Sum("content/fac_helldivers/capes/medium_cape") {
+			value, contains = set.UnitMetadata[stingray.Hash{}]
+		}
 		if !contains {
 			continue
 		}
@@ -574,6 +1082,39 @@ func (pv *UnitPreviewState) getArmorInfo(name stingray.Hash) (armorInfo *datalib
 		armorInfo = &value
 	}
 	return
+}
+
+// relatedArmorKits selects capes only when the game table gives a matching
+// nonzero set ID. A shared ID may list multiple capes, so use the selected
+// cape when applicable, otherwise pick the first consistently by archive.
+func relatedArmorKits(all map[stingray.Hash]datalib.ArmorSet, selected datalib.ArmorSet) []datalib.ArmorSet {
+	sets := make([]datalib.ArmorSet, 0)
+	capes := make([]datalib.ArmorSet, 0)
+	for _, set := range all {
+		if set.SetId != selected.SetId || (selected.SetId == 0 && set.Id != selected.Id) {
+			continue
+		}
+		if set.Type == datalib.KitCape {
+			capes = append(capes, set)
+		} else {
+			sets = append(sets, set)
+		}
+	}
+	slices.SortFunc(capes, func(a, b datalib.ArmorSet) int { return a.Archive.Cmp(b.Archive) })
+	if len(capes) > 0 {
+		chosen := capes[0]
+		if selected.Type == datalib.KitCape {
+			for _, cape := range capes {
+				if cape.Id == selected.Id {
+					chosen = cape
+					break
+				}
+			}
+		}
+		sets = append(sets, chosen)
+	}
+	slices.SortFunc(sets, func(a, b datalib.ArmorSet) int { return a.Archive.Cmp(b.Archive) })
+	return sets
 }
 
 func (pv *UnitPreviewState) removeRenderedObject(nodeId stingray.Hash) {
@@ -614,6 +1155,11 @@ func (pv *UnitPreviewState) Clear() {
 	for hash := range pv.nodes {
 		pv.removeRenderedObject(hash)
 	}
+	clear(pv.nodes)
+	clear(pv.unitInfos)
+	pv.mountedAttachmentsLoaded = false
+	pv.mountedAttachmentNodes = nil
+	pv.mountedAttachmentWarnings = nil
 	pv.ml.DeleteAssetGradingLut()
 }
 
@@ -621,29 +1167,50 @@ func (pv *UnitPreviewState) Clear() {
 func (pv *UnitPreviewState) getMaxZoom(node unitPreviewNode, nodeId stingray.FileID, useSkeleton bool) (maxViewDistance float32) {
 	// Get origin sphere around mesh
 	var maxDistSqrFromOrigin float32
+	modelTranslation := mgl32.Translate3D(pv.modelPos[0], pv.modelPos[1], pv.modelPos[2])
 	var calcDistance func(unitPreviewNode, stingray.FileID, mgl32.Mat4, bool)
 	calcDistance = func(curr unitPreviewNode, nodeId stingray.FileID, matrix mgl32.Mat4, useSkeleton bool) {
+		if !curr.shown {
+			return
+		}
+		sceneMatrix := pv.model.Mul4(modelTranslation).Mul4(matrix)
 		for _, childHash := range curr.children {
 			if child, contains := pv.nodes[childHash.Name]; contains && nodeId != childHash {
 				calcDistance(child, childHash, matrix.Mul4(child.matrix), useSkeleton)
 			}
 			if _, contains := pv.objects[childHash]; contains {
 				for name := range pv.objects[childHash] {
+					if shown, exists := pv.objectsShown[childHash][name]; exists && !shown {
+						continue
+					}
+					boundsMatrix := sceneMatrix.Mul4(pv.aabbMat[childHash][name])
 					for _, p := range pv.getAABBVertices(childHash, name) {
-						maxDistSqrFromOrigin = max(maxDistSqrFromOrigin,
-							matrix.Mul4(pv.aabbMat[childHash][name]).Mul4x1(p.Vec4(1.0)).Vec3().LenSqr())
+						position := boundsMatrix.Mul4x1(p.Vec4(1.0))
+						if position.W() != 0 {
+							position = position.Mul(1 / position.W())
+						}
+						distanceSqr := position.Vec3().LenSqr()
+						if !math.IsNaN(float64(distanceSqr)) && !math.IsInf(float64(distanceSqr), 0) {
+							maxDistSqrFromOrigin = max(maxDistSqrFromOrigin, distanceSqr)
+						}
 					}
 				}
 				if skeletonVertices, contains := pv.skeletonPositions[childHash]; contains && useSkeleton {
 					for _, sk := range skeletonVertices {
-						maxDistSqrFromOrigin = max(maxDistSqrFromOrigin,
-							matrix.Mul4x1(sk.Vec4(1.0)).Vec3().LenSqr())
+						position := sceneMatrix.Mul4x1(sk.Vec4(1.0))
+						if position.W() != 0 {
+							position = position.Mul(1 / position.W())
+						}
+						distanceSqr := position.Vec3().LenSqr()
+						if !math.IsNaN(float64(distanceSqr)) && !math.IsInf(float64(distanceSqr), 0) {
+							maxDistSqrFromOrigin = max(maxDistSqrFromOrigin, distanceSqr)
+						}
 					}
 				}
 			}
 		}
 	}
-	calcDistance(node, nodeId, mgl32.Ident4(), useSkeleton)
+	calcDistance(node, nodeId, node.matrix, useSkeleton)
 
 	maxDistFromOrigin := float32(math.Sqrt(float64(maxDistSqrFromOrigin)))
 
@@ -685,11 +1252,13 @@ func (pv *UnitPreviewState) getNodeUnitFileID(nodeId stingray.Hash) (stingray.Fi
 	return hash, contains
 }
 
-func (pv *UnitPreviewState) LoadLevel(fileID stingray.Hash, mainData []byte, entityInfo *entity.Entity) error {
+func (pv *UnitPreviewState) LoadLevel(fileID stingray.Hash, mainData []byte, entityContext ...*entity.Entity) error {
+	if len(entityContext) > 0 {
+		pv.SetEntityInfo(entityContext[0])
+	}
 	if pv.nodes == nil {
 		pv.nodes = make(map[stingray.Hash]unitPreviewNode)
 	}
-	pv.ml.SetEntity(entityInfo)
 
 	pv.maxViewDistance = 0.001
 
@@ -727,6 +1296,7 @@ func (pv *UnitPreviewState) LoadLevel(fileID stingray.Hash, mainData []byte, ent
 			parent:   fileID,
 		}
 		if _, contains := pv.objects[unitID]; contains {
+			pv.setNodeSceneOverlay(unit.UUID, unitID)
 			continue
 		}
 		unitMainData, exists, err := pv.getResource(unitID, stingray.DataMain)
@@ -744,6 +1314,7 @@ func (pv *UnitPreviewState) LoadLevel(fileID stingray.Hash, mainData []byte, ent
 		if err != nil {
 			return fmt.Errorf("loading %v.unit in %v.level for rendering: %v", pv.lookupHash(unit.Hash), pv.lookupHash(fileID), err)
 		}
+		pv.setNodeSceneOverlay(unit.UUID, unitID)
 	}
 
 	for _, speedtree := range levelInfo.Speedtrees {
@@ -960,6 +1531,7 @@ func (pv *UnitPreviewState) loadPrefabInfo(fileID stingray.FileID, info *prefab.
 				children: []stingray.FileID{unitID},
 				parent:   fileID.Name,
 			}
+			pv.setNodeSceneOverlay(unit.UUID, unitID)
 			continue
 		}
 		unitMainData, exists, err := pv.getResource(unitID, stingray.DataMain)
@@ -985,6 +1557,7 @@ func (pv *UnitPreviewState) loadPrefabInfo(fileID stingray.FileID, info *prefab.
 			children: []stingray.FileID{unitID},
 			parent:   fileID.Name,
 		}
+		pv.setNodeSceneOverlay(unit.UUID, unitID)
 	}
 
 	for _, prefab := range info.NestedPrefabs {
@@ -1021,13 +1594,30 @@ func (pv *UnitPreviewState) loadPrefabInfo(fileID stingray.FileID, info *prefab.
 	return contents, nil
 }
 
-func (pv *UnitPreviewState) LoadUnit(fileID stingray.Hash, mainData, gpuData []byte, entityInfo *entity.Entity) error {
+func (pv *UnitPreviewState) LoadUnit(fileID stingray.Hash, mainData, gpuData []byte, entityContext ...*entity.Entity) error {
+	if len(entityContext) > 0 {
+		pv.SetEntityInfo(entityContext[0])
+	}
+	pv.lodLevel = 0
+	pv.maxLODLevel = 0
+	unitID := stingray.NewFileID(fileID, UNIT)
+	if pv.damageOverlayUnit != unitID {
+		pv.damageOverlayBoxes = nil
+		pv.damageOverlayVolumes = nil
+		pv.damageOverlayUnit = stingray.FileID{}
+		pv.damageOverlayLoaded = false
+		pv.damageOverlayError = ""
+		pv.rootHealthComponent = nil
+		pv.rootHealthLoaded = false
+		pv.rootHealthLoadError = ""
+	}
+	pv.mountedAttachmentsLoaded = false
+	pv.mountedAttachmentNodes = nil
+	pv.mountedAttachmentWarnings = nil
 	if pv.nodes == nil {
 		pv.nodes = make(map[stingray.Hash]unitPreviewNode)
 	}
-	pv.ml.SetEntity(entityInfo)
 
-	unitID := stingray.NewFileID(fileID, UNIT)
 	pv.root = unitPreviewNode{
 		name:     pv.lookupHash(fileID),
 		shown:    true,
@@ -1041,6 +1631,18 @@ func (pv *UnitPreviewState) LoadUnit(fileID stingray.Hash, mainData, gpuData []b
 	if err := pv.loadUnit(unitID, mainData, gpuData); err != nil {
 		return err
 	}
+	if pv.showPhysicsHitboxes || pv.showDamageBoxes || pv.showDamageReadout {
+		if err := pv.loadDamageOverlayData(); err != nil {
+			pv.damageOverlayError = err.Error()
+		}
+	}
+	if pv.mountedAttachmentsEnabled {
+		if err := pv.loadMountedAttachments(); err != nil {
+			pv.mountedAttachmentWarnings = append(pv.mountedAttachmentWarnings, err.Error())
+			fmt.Printf("[warning] loading mounted attachments for %v: %v\n", pv.lookupHash(fileID), err)
+		}
+		pv.mountedAttachmentsLoaded = true
+	}
 
 	if err := pv.finalizeObjectMaterials(); err != nil {
 		return err
@@ -1051,17 +1653,90 @@ func (pv *UnitPreviewState) LoadUnit(fileID stingray.Hash, mainData, gpuData []b
 	return nil
 }
 
+func (pv *UnitPreviewState) SetLOD(level int) error {
+	level = min(max(level, 0), pv.maxLODLevel)
+	if level == pv.lodLevel {
+		return nil
+	}
+	pv.lodLevel = level
+	for fileID := range pv.objects {
+		if fileID.Type != UNIT {
+			continue
+		}
+		mainData, exists, err := pv.getResource(fileID, stingray.DataMain)
+		if err != nil {
+			return fmt.Errorf("read unit for LOD change: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("unit %v disappeared while changing LOD", fileID)
+		}
+		gpuData, _, err := pv.getResource(fileID, stingray.DataGPU)
+		if err != nil {
+			return fmt.Errorf("read unit GPU data for LOD change: %w", err)
+		}
+		if err := pv.loadUnit(fileID, mainData, gpuData); err != nil {
+			return fmt.Errorf("reload unit at LOD %d: %w", level, err)
+		}
+	}
+	if err := pv.finalizeObjectMaterials(); err != nil {
+		return fmt.Errorf("finalize materials after LOD change: %w", err)
+	}
+	pv.maxViewDistance = pv.getMaxZoom(pv.root, pv.rootHash, len(pv.aabb[pv.rootHash]) == 0)
+	return nil
+}
+
 func materialShown(slot string) bool {
-	return !strings.Contains(slot, "gibs") && slot != "transparent"
+	normalized := strings.ToLower(slot)
+	if strings.Contains(normalized, "gibs") || normalized == "transparent" {
+		return false
+	}
+	// These are auxiliary surfaces used by the game for shadows, culling, or
+	// collision. They are useful in metadata but are not part of the visible model.
+	for _, part := range strings.FieldsFunc(normalized, func(r rune) bool {
+		return r == '_' || r == '-' || r == '/' || r == '.' || r == ' '
+	}) {
+		if part == "shadow" || part == "collision" || part == "culling" {
+			return false
+		}
+	}
+	return true
 }
 
 func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData []byte) error {
-	info, err := unit.LoadInfo(bytes.NewReader(mainData))
-	if err != nil {
-		return err
+	var err error
+	var info *unit.Info
+	var meshes map[string]unit.Mesh
+	var defaultShown map[string]bool
+	if pv.isHelldivers1 {
+		info, meshes, err = unit.LoadHelldivers1(mainData)
+		if err != nil {
+			return err
+		}
+		defaultShown = make(map[string]bool, len(meshes))
+		for name := range meshes {
+			defaultShown[name] = true
+		}
+	} else {
+		info, err = unit.LoadInfo(bytes.NewReader(mainData))
+		if err != nil {
+			return err
+		}
+		if pv.unitInfos == nil {
+			pv.unitInfos = make(map[stingray.FileID]*unit.Info)
+		}
+		pv.unitInfos[fileID] = info
+		if fileID == pv.rootHash && fileID.Type == UNIT {
+			pv.rootUnitInfo = info
+		}
+		if fileID == pv.rootHash && pv.animationEnabled {
+			pv.loadLinkedAnimations(info)
+		}
 	}
 
 	setModelPos := len(pv.objects) == 0
+	if setModelPos {
+		pv.modelPos = mgl32.Vec4{0, 0, 0, 1}
+	}
 
 	if pv.objects == nil {
 		pv.objects = make(map[stingray.FileID]map[string]unitPreviewObject)
@@ -1075,11 +1750,16 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 		pv.meshPositions = make(map[stingray.FileID]map[string][][3]float32)
 		pv.meshNormals = make(map[stingray.FileID]map[string][][3]float32)
 		pv.skeletonPositions = make(map[stingray.FileID][]mgl32.Vec3)
+		pv.skeletonBoneIndices = make(map[stingray.FileID][]int)
+		pv.visibilityMasks = make(map[stingray.FileID]*unitVisibilityMasks)
+	}
+	if pv.visibilityMasks == nil {
+		pv.visibilityMasks = make(map[stingray.FileID]*unitVisibilityMasks)
 	}
 
-	var meshes map[string]unit.Mesh
-	var defaultShown map[string]bool
-	if len(info.MeshInfos) > 0 && info.GeometryGroup.Value == 0x0 {
+	if pv.isHelldivers1 {
+		// HD1 unit records contain their own vertex and index buffers.
+	} else if len(info.MeshInfos) > 0 && info.GeometryGroup.Value == 0x0 {
 		meshes, defaultShown, err = pv.loadMeshes(info.MeshInfos, info.MeshLayouts, gpuData)
 		if err != nil {
 			return err
@@ -1099,7 +1779,7 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 		meshes = make(map[string]unit.Mesh)
 		meshes["terrain"] = mesh
 		info.Materials[stingray.Sum("terrain").Thin()] = fileID.Name
-		defaultShown = map[string]bool{"terrain": true}
+		defaultShown = map[string]bool{"terrain": !pv.hideLevelGround}
 	} else if info.GeometryGroup.Value != 0x0 && info.GeometryGroup.Value != 0xfce38c71ca9c2166 {
 		// 0xfce38c71ca9c2166 seems to be a "dev assets" geometry group that isn't included in the
 		// prod release of the game, so in our POV its the same as a null geometry group
@@ -1213,8 +1893,19 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 			continue
 		}
 
-		object := unitPreviewObject{}
+		object := unitPreviewObject{boneIndex: int(mesh.Info.Header.TransformIdx), skeletonMapIndex: -1}
 		object.matrix = info.Bones[mesh.Info.Header.TransformIdx].Matrix
+		object.bindMatrix = object.matrix
+		if pv.animationEnabled && (fileID == pv.rootHash || pv.armorAnimationMode) && mesh.Info.Header.SkeletonMapIdx >= 0 &&
+			int(mesh.Info.Header.SkeletonMapIdx) < len(info.SkeletonMaps) && len(mesh.BoneIndices) > 0 &&
+			len(mesh.BoneIndices[0]) == len(mesh.Positions) && len(mesh.BoneWeights) == len(mesh.Positions) {
+			object.skeletonMapIndex = int(mesh.Info.Header.SkeletonMapIdx)
+			object.basePositions = mesh.Positions
+			object.baseNormals = mesh.Normals
+			object.baseBoneIndices = remapMeshBoneIndices(mesh.BoneIndices[0], mesh.Info.Groups, &info.SkeletonMaps[object.skeletonMapIndex])
+			object.baseBoneWeights = mesh.BoneWeights
+			object.normalsOffset = len(mesh.Positions) * 3 * 4
+		}
 		object.name = fileID.Name
 		wireframe := preview_mats.NewWireframeMaterial()
 		err = wireframe.Generate()
@@ -1234,7 +1925,9 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 		{
 			object.genObjects(true, 0)
 			object.ibos = make([]uint32, len(mesh.Indices))
-			gl.GenBuffers(int32(len(object.ibos)), &object.ibos[0])
+			if len(object.ibos) > 0 {
+				gl.GenBuffers(int32(len(object.ibos)), &object.ibos[0])
+			}
 
 			for idx := range object.materials {
 				// release textures and delete shaders from old materials
@@ -1251,9 +1944,33 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 					//return fmt.Errorf("load material: id %v not found", matID.String())
 				}
 				name := pv.lookupThinHash(matID)
+				if materialName, ok := info.MaterialNames[matID]; ok {
+					name = materialName
+				}
 				materialID := stingray.NewFileID(matFileName, MATERIAL)
 
-				mat, err := loadMaterialInfo(pv.getResource, materialID)
+				var mat *material.Material
+				var err error
+				if pv.isHelldivers1 {
+					if pv.resolveHD1Material != nil {
+						resolvedID, materialData, exists, resolveErr := pv.resolveHD1Material(fileID, matID)
+						if resolveErr != nil {
+							err = resolveErr
+						} else if exists {
+							materialID = resolvedID
+							aliases := make([]stingray.ThinHash, 0, len(info.MaterialNames))
+							for alias := range info.MaterialNames {
+								aliases = append(aliases, alias)
+							}
+							mat, err = material.LoadHelldivers1Main(materialData, matID, aliases, func(textureName stingray.Hash) bool {
+								textureData, textureExists, textureErr := pv.getResource(stingray.NewFileID(textureName, stingray.Sum("texture")), stingray.DataMain)
+								return textureErr == nil && textureExists && len(textureData) >= 4 && string(textureData[:4]) == "DDS "
+							})
+						}
+					}
+				} else {
+					mat, err = loadMaterialInfo(pv.getResource, materialID)
+				}
 				if err != nil {
 					fmt.Printf("[warning] loading material %v: %v\n", pv.lookupHash(materialID.Name), err)
 				}
@@ -1320,6 +2037,44 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 				gl.EnableVertexAttribArray(index)
 				offset += uvsSize
 			}
+			if object.skeletonMapIndex >= 0 {
+				// Bone data is static per mesh; leave per-frame skinning to the
+				// vertex shader so large creatures do not stall the UI thread.
+				skinMap := &info.SkeletonMaps[object.skeletonMapIndex]
+				boneAttributes := make([][8]float32, len(object.baseBoneIndices))
+				for vertex, indices := range object.baseBoneIndices {
+					for influence := range 4 {
+						localBone := int(indices[influence])
+						boneAttributes[vertex][influence] = float32(localBone)
+						weight := object.baseBoneWeights[vertex][influence]
+						if localBone >= len(skinMap.BoneIndices) {
+							weight = 0
+						}
+						boneAttributes[vertex][influence+4] = weight
+					}
+				}
+				gl.GenBuffers(1, &object.animAttribVBO)
+				gl.BindBuffer(gl.ARRAY_BUFFER, object.animAttribVBO)
+				gl.BufferData(gl.ARRAY_BUFFER, len(boneAttributes)*32, gl.Ptr(boneAttributes), gl.STATIC_DRAW)
+				gl.VertexAttribPointer(14, 4, gl.FLOAT, false, 8*4, gl.PtrOffset(0))
+				gl.EnableVertexAttribArray(14)
+				gl.VertexAttribPointer(15, 4, gl.FLOAT, false, 8*4, gl.PtrOffset(4*4))
+				gl.EnableVertexAttribArray(15)
+
+				object.animSkinMatrices = make([]mgl32.Mat4, len(skinMap.BoneIndices))
+				object.animNormalMatrices = make([]mgl32.Mat4, len(skinMap.BoneIndices))
+				for i := range object.animSkinMatrices {
+					object.animSkinMatrices[i] = mgl32.Ident4()
+					object.animNormalMatrices[i] = mgl32.Ident4()
+				}
+				gl.GenBuffers(1, &object.animSkinBuffer)
+				gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, object.animSkinBuffer)
+				gl.BufferData(gl.SHADER_STORAGE_BUFFER, len(object.animSkinMatrices)*64, gl.Ptr(object.animSkinMatrices), gl.DYNAMIC_DRAW)
+				gl.GenBuffers(1, &object.animNormalBuffer)
+				gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, object.animNormalBuffer)
+				gl.BufferData(gl.SHADER_STORAGE_BUFFER, len(object.animNormalMatrices)*64, gl.Ptr(object.animNormalMatrices), gl.DYNAMIC_DRAW)
+				gl.BindBuffer(gl.SHADER_STORAGE_BUFFER, 0)
+			}
 
 			// Setup instance model/normal matrix attributes
 			gl.BindBuffer(gl.ARRAY_BUFFER, object.imbo)
@@ -1355,7 +2110,9 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 			object.indexType = make([]uint32, len(mesh.Indices))
 			for group, indices := range mesh.Indices {
 				gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, object.ibos[group])
-				gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(indices)*4, gl.Ptr(indices), gl.STATIC_DRAW)
+				if len(indices) > 0 {
+					gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, len(indices)*4, gl.Ptr(indices), gl.STATIC_DRAW)
+				}
 				object.numIndices[group] = int32(len(indices))
 				object.indexType[group] = gl.UNSIGNED_INT
 			}
@@ -1423,19 +2180,22 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 	}
 
 	skeletonVertices := make([]mgl32.Vec3, 0)
+	skeletonBoneIndices := make([]int, 0)
 	skeletonIndices := make([]uint32, 0)
 	root := info.Bones[0]
-	var recurseSkeleton func(unit.Bone) uint32
-	recurseSkeleton = func(curr unit.Bone) uint32 {
+	var recurseSkeleton func(uint32) uint32
+	recurseSkeleton = func(boneIndex uint32) uint32 {
+		curr := info.Bones[boneIndex]
 		currentVertex := uint32(len(skeletonVertices))
+		skeletonBoneIndices = append(skeletonBoneIndices, int(boneIndex))
 		skeletonVertices = append(skeletonVertices, curr.Matrix.Mul4x1(mgl32.Vec4{0.0, 0.0, 0.0, 1.0}).Vec3())
 		for _, idx := range curr.Children {
-			childVertexIdx := recurseSkeleton(info.Bones[idx])
+			childVertexIdx := recurseSkeleton(idx)
 			skeletonIndices = append(skeletonIndices, currentVertex, childVertexIdx)
 		}
 		return currentVertex
 	}
-	recurseSkeleton(root)
+	recurseSkeleton(root.Index)
 
 	if len(skeletonIndices) > 0 {
 		if pv.skeletons == nil {
@@ -1488,6 +2248,7 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 			pv.skeletons[fileID].deleteObjects(pv.ml)
 		}
 		pv.skeletonPositions[fileID] = skeletonVertices
+		pv.skeletonBoneIndices[fileID] = skeletonBoneIndices
 		pv.skeletons[fileID] = skeleton
 	}
 
@@ -1499,11 +2260,7 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 		pv.doAutoZoomNextFrame = true
 	}
 
-	for i := range pv.udimsShownDefault {
-		pv.udimsShownDefault[i] = true
-		pv.udimNames[i] = ""
-	}
-	pv.numUdims = 1
+	visibilityState := newUnitVisibilityMasks()
 	visibilityMasks, err := datalib.ParseVisibilityMasks()
 	if err != nil {
 		return err
@@ -1523,29 +2280,46 @@ func (pv *UnitPreviewState) loadUnit(fileID stingray.FileID, mainData, gpuData [
 			}
 		}
 		for _, info := range visibilityMask.MaskInfos {
-			if int(info.Index) >= len(pv.udimsShownDefault) {
+			if int(info.Index) >= len(visibilityState.defaults) {
 				// No support for udims with index > 64 at the moment
 				continue
 			}
 			if info.Name.Value == 0 {
 				continue
 			}
-			pv.numUdims = max(uint32(info.Index)+1, pv.numUdims)
-
-			pv.udimsShownDefault[info.Index] = info.StartHidden == 0
+			visibilityState.num = max(uint32(info.Index)+1, visibilityState.num)
+			visibilityState.defaults[info.Index] = info.StartHidden == 0
 			name := pv.lookupThinHash(info.Name)
-			pv.udimNames[info.Index] = name
+			visibilityState.names[info.Index] = name
+			visibilityState.hashes[info.Index] = info.Name
 		}
 	}
-	pv.udimsSelected = pv.udimsShownDefault
+	visibilityState.revealIntactBodySegments(meshes)
+	visibilityState.selected = visibilityState.defaults
+	visibilityState.syncShown()
+	pv.visibilityMasks[fileID] = visibilityState
+	if fileID == pv.rootHash {
+		pv.numUdims = visibilityState.num
+		pv.udimsShownDefault = visibilityState.defaults
+		pv.udimsSelected = visibilityState.selected
+		pv.udimsShown = visibilityState.shown
+		pv.udimNames = visibilityState.names
+		pv.rootHealthComponent = nil
+		pv.rootHealthLoaded = false
+		pv.rootHealthLoadError = ""
+		pv.damageModelSelection = damageModelIntact
+	}
 
+	pv.updateUnitBoundsFromVertices(fileID)
 	if setModelPos {
-		for name := range pv.objects[fileID] {
-			if shown, contains := pv.objectsShown[fileID][name]; contains && !shown {
-				continue
+		if !pv.centerUnitOnVisibleBounds(fileID) {
+			for name := range pv.objects[fileID] {
+				if shown, contains := pv.objectsShown[fileID][name]; contains && !shown {
+					continue
+				}
+				pv.modelPos = pv.objects[fileID][name].matrix.Inv().Mul4x1(mgl32.Vec4{0, 0, 0, 1})
+				break
 			}
-			pv.modelPos = pv.objects[fileID][name].matrix.Inv().Mul4x1(mgl32.Vec4{0, 0, 0, 1})
-			break
 		}
 	}
 
@@ -2004,10 +2778,48 @@ func (pv *UnitPreviewState) loadSpeedtree(speedtreeID stingray.FileID, mainData,
 	return nil
 }
 
+// SetArmorContext makes the LUTs of these kit archives apply to the pieces shown (Armor Set window).
+func (pv *UnitPreviewState) SetArmorContext(archives []stingray.Hash) {
+	if slices.Equal(pv.armorContextArchives, archives) {
+		return
+	}
+	pv.armorContextArchives = archives
+	pv.reapplyArmorMaterials()
+}
+
+// LoadArmorSetByKit assembles the whole set (armor + helmet) the kit with this id belongs to,
+// whatever the Archive Filter selection is. Returns false if the kit is unknown.
+func (pv *UnitPreviewState) LoadArmorSetByKit(kitID uint32) bool {
+	var found *datalib.ArmorSet
+	for _, set := range pv.armorSets {
+		if set.Id.Value == kitID {
+			s := set
+			found = &s
+			break
+		}
+	}
+	if found == nil {
+		return false
+	}
+	sets := relatedArmorKits(pv.armorSets, *found)
+	ctx := make([]stingray.Hash, 0)
+	for _, set := range sets {
+		ctx = append(ctx, set.Archive)
+	}
+	slices.SortFunc(ctx, stingray.Hash.Cmp)
+	pv.armorContextArchives = ctx
+	pv.selectedSet = int64(kitID)
+	pv.loadArmorSet(sets)
+	return pv.HasLoadedUnit()
+}
+
 // Loads the specified armor set and any others in the armor set list that share the armor set id
 // Therefore this can load the armor and helmet at the same time
 func (pv *UnitPreviewState) loadArmorSet(armorSets []datalib.ArmorSet) {
 	pv.Clear()
+	if pv.nodes == nil {
+		pv.nodes = make(map[stingray.Hash]unitPreviewNode)
+	}
 	var selectedSet int
 	for idx := range armorSets {
 		if armorSets[idx].Id.Value == uint32(pv.selectedSet) {
@@ -2016,6 +2828,15 @@ func (pv *UnitPreviewState) loadArmorSet(armorSets []datalib.ArmorSet) {
 		}
 	}
 	setId := armorSets[selectedSet].SetId
+	hasStocky := false
+	for _, set := range armorSets {
+		for _, data := range set.UnitMetadata {
+			if data.BodyType == datalib.BodyTypeStocky {
+				hasStocky = true
+				break
+			}
+		}
+	}
 	pv.nodes[stingray.Sum("body_any")] = unitPreviewNode{
 		name:     "Any",
 		shown:    true,
@@ -2032,7 +2853,7 @@ func (pv *UnitPreviewState) loadArmorSet(armorSets []datalib.ArmorSet) {
 	}
 	pv.nodes[stingray.Sum("body_female")] = unitPreviewNode{
 		name:     "Slim",
-		shown:    true,
+		shown:    !hasStocky,
 		matrix:   mgl32.Ident4(),
 		children: []stingray.FileID{},
 		parent:   armorSets[selectedSet].Archive,
@@ -2041,17 +2862,40 @@ func (pv *UnitPreviewState) loadArmorSet(armorSets []datalib.ArmorSet) {
 		if set.SetId != setId {
 			continue
 		}
-		for childHash := range set.UnitMetadata {
+		for childHash, piece := range set.UnitMetadata {
+			if childHash.Value == 0 {
+				if set.Type != datalib.KitCape {
+					continue
+				}
+				childHash = stingray.Sum("content/fac_helldivers/capes/medium_cape")
+			}
+			if pv.armorThumbnailOnly && hasStocky && piece.BodyType == datalib.BodyTypeSlim {
+				continue
+			}
 			fileId := stingray.NewFileID(childHash, UNIT)
-			unitMain, exists, err := pv.getResource(fileId, stingray.DataMain)
-			if err != nil || !exists {
-				continue
+			if _, loaded := pv.objects[fileId]; !loaded {
+				unitMain, exists, err := pv.getResource(fileId, stingray.DataMain)
+				if err != nil || !exists {
+					continue
+				}
+				unitGpu, _, _ := pv.getResource(fileId, stingray.DataGPU)
+				if err := pv.loadUnit(fileId, unitMain, unitGpu); err != nil {
+					continue
+				}
 			}
-			unitGpu, _, _ := pv.getResource(fileId, stingray.DataGPU)
-			if err := pv.loadUnit(fileId, unitMain, unitGpu); err != nil {
-				continue
+			// A standalone cape kit uses the shared medium-cape unit, whose
+			// other meshes are alternate and backpack variants. Select only the
+			// main mesh by default while keeping the variants in the tree.
+			if childHash == stingray.Sum("content/fac_helldivers/capes/medium_cape") {
+				if _, ok := pv.objects[fileId]["medium_cape"]; ok {
+					for name := range pv.objects[fileId] {
+						shown := name == "medium_cape"
+						pv.objectsShown[fileId][name] = shown
+						pv.objectsShownDefault[fileId][name] = shown
+					}
+				}
 			}
-			switch set.UnitMetadata[childHash].BodyType {
+			switch piece.BodyType {
 			case datalib.BodyTypeAny:
 				node := pv.nodes[stingray.Sum("body_any")]
 				node.children = append(node.children, fileId)
@@ -2081,8 +2925,9 @@ func (pv *UnitPreviewState) loadArmorSet(armorSets []datalib.ArmorSet) {
 	pv.rootHash = stingray.NewFileID(armorSets[selectedSet].Archive, stingray.Hash{})
 	pv.nodes[pv.rootHash.Name] = pv.root
 
+	pv.centerArmorOnVisibleBounds()
 	pv.maxViewDistance = pv.getMaxZoom(pv.root, pv.rootHash, false)
-	pv.modelPos = mgl32.Vec4{0.0, 0.0, 0.0, 1.0}
+	pv.doAutoZoomNextFrame = true
 
 	pv.finalizeObjectMaterials()
 }
@@ -2127,6 +2972,21 @@ func (pv *UnitPreviewState) computeMVP(aspectRatio float32, animate bool) (
 	return
 }
 
+// previewSceneModelMatrix stabilizes the displayed model and its mounted parts
+// against root translation in locomotion clips.
+func (pv *UnitPreviewState) previewSceneModelMatrix(modelPos mgl32.Vec4) mgl32.Mat4 {
+	correction := pv.animationRootMotionCorrection()
+	return pv.previewBaseSceneModelMatrix(modelPos).
+		Mul4(mgl32.Translate3D(correction[0], correction[1], correction[2]))
+}
+
+// previewBaseSceneModelMatrix is used for damage and hitbox overlays. Those
+// boxes follow the animation's actual bone transforms without the preview-only
+// root-motion correction applied to the displayed model.
+func (pv *UnitPreviewState) previewBaseSceneModelMatrix(modelPos mgl32.Vec4) mgl32.Mat4 {
+	return pv.model.Mul4(mgl32.Translate3D(modelPos[0], modelPos[1], modelPos[2]))
+}
+
 var aabbIndices = [12 * 3]uint32{
 	1, 2, 0,
 	1, 3, 2,
@@ -2155,6 +3015,156 @@ func (pv *UnitPreviewState) getAABBVertices(fileId stingray.FileID, name string)
 	}
 }
 
+func (pv *UnitPreviewState) centerUnitOnVisibleBounds(fileID stingray.FileID) bool {
+	minBounds, maxBounds, found := pv.visibleUnitBounds(fileID)
+	if !found {
+		return false
+	}
+	center := minBounds.Add(maxBounds).Mul(0.5)
+	pv.modelPos = mgl32.Vec4{-center[0], -center[1], -center[2], 1}
+	return true
+}
+
+// Armor sets are scene roots containing several separate unit resources.
+// Their root has no mesh bounds, so include visible child units and transforms.
+func (pv *UnitPreviewState) centerArmorOnVisibleBounds() bool {
+	minBounds := mgl32.Vec3{float32(math.Inf(1)), float32(math.Inf(1)), float32(math.Inf(1))}
+	maxBounds := mgl32.Vec3{float32(math.Inf(-1)), float32(math.Inf(-1)), float32(math.Inf(-1))}
+	found := false
+	var visit func(unitPreviewNode, mgl32.Mat4)
+	visit = func(node unitPreviewNode, transform mgl32.Mat4) {
+		if !node.shown {
+			return
+		}
+		for _, id := range node.children {
+			if child, ok := pv.nodes[id.Name]; ok {
+				visit(child, transform.Mul4(child.matrix))
+			}
+			low, high, ok := pv.visibleUnitBounds(id)
+			if !ok {
+				continue
+			}
+			for mask := 0; mask < 8; mask++ {
+				point := mgl32.Vec3{low[0], low[1], low[2]}
+				for axis := range 3 {
+					if mask&(1<<axis) != 0 {
+						point[axis] = high[axis]
+					}
+				}
+				p := transform.Mul4x1(point.Vec4(1))
+				if p.W() == 0 {
+					continue
+				}
+				p = p.Mul(1 / p.W())
+				if math.IsNaN(float64(p[0])) || math.IsNaN(float64(p[1])) || math.IsNaN(float64(p[2])) || math.IsInf(float64(p[0]), 0) || math.IsInf(float64(p[1]), 0) || math.IsInf(float64(p[2]), 0) {
+					continue
+				}
+				for axis := range 3 {
+					minBounds[axis] = min(minBounds[axis], p[axis])
+					maxBounds[axis] = max(maxBounds[axis], p[axis])
+				}
+				found = true
+			}
+		}
+	}
+	visit(pv.root, pv.root.matrix)
+	if found {
+		center := minBounds.Add(maxBounds).Mul(0.5)
+		pv.modelPos = mgl32.Vec4{-center[0], -center[1], -center[2], 1}
+	}
+	return found
+}
+
+func (pv *UnitPreviewState) updateUnitBoundsFromVertices(fileID stingray.FileID) {
+	for name, object := range pv.objects[fileID] {
+		positions := pv.meshPositions[fileID][name]
+		if len(positions) == 0 {
+			continue
+		}
+		minBounds := mgl32.Vec3{float32(math.Inf(1)), float32(math.Inf(1)), float32(math.Inf(1))}
+		maxBounds := mgl32.Vec3{float32(math.Inf(-1)), float32(math.Inf(-1)), float32(math.Inf(-1))}
+		found := false
+		for _, position := range positions {
+			point := object.matrix.Mul4x1(mgl32.Vec3(position).Vec4(1))
+			if point.W() == 0 || math.IsNaN(float64(point.W())) || math.IsInf(float64(point.W()), 0) {
+				continue
+			}
+			point = point.Mul(1 / point.W())
+			valid := true
+			for axis := range 3 {
+				if math.IsNaN(float64(point[axis])) || math.IsInf(float64(point[axis]), 0) {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				continue
+			}
+			for axis := range 3 {
+				minBounds[axis] = min(minBounds[axis], point[axis])
+				maxBounds[axis] = max(maxBounds[axis], point[axis])
+			}
+			found = true
+		}
+		if found {
+			pv.aabb[fileID][name] = [2]mgl32.Vec3{minBounds, maxBounds}
+			pv.aabbMat[fileID][name] = mgl32.Ident4()
+		}
+	}
+}
+
+func (pv *UnitPreviewState) visibleUnitBounds(fileID stingray.FileID) (minBounds, maxBounds mgl32.Vec3, found bool) {
+	minBounds = mgl32.Vec3{float32(math.Inf(1)), float32(math.Inf(1)), float32(math.Inf(1))}
+	maxBounds = mgl32.Vec3{float32(math.Inf(-1)), float32(math.Inf(-1)), float32(math.Inf(-1))}
+	for name := range pv.objects[fileID] {
+		if shown, exists := pv.objectsShown[fileID][name]; exists && !shown {
+			continue
+		}
+		_, hasBounds := pv.aabb[fileID][name]
+		boundsMatrix, hasMatrix := pv.aabbMat[fileID][name]
+		if !hasBounds || !hasMatrix {
+			continue
+		}
+		for _, corner := range pv.getAABBVertices(fileID, name) {
+			point := boundsMatrix.Mul4x1(corner.Vec4(1))
+			if point.W() == 0 || math.IsNaN(float64(point.W())) || math.IsInf(float64(point.W()), 0) {
+				continue
+			}
+			point = point.Mul(1 / point.W())
+			valid := true
+			for axis := range 3 {
+				coordinate := point[axis]
+				if math.IsNaN(float64(coordinate)) || math.IsInf(float64(coordinate), 0) {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				continue
+			}
+			for axis := range 3 {
+				coordinate := point[axis]
+				minBounds[axis] = min(minBounds[axis], coordinate)
+				maxBounds[axis] = max(maxBounds[axis], coordinate)
+			}
+			found = true
+		}
+	}
+	if !found {
+		return minBounds, maxBounds, false
+	}
+	return minBounds, maxBounds, found
+}
+
+func (pv *UnitPreviewState) VisibleModelExtent(fileID stingray.FileID) float64 {
+	minBounds, maxBounds, found := pv.visibleUnitBounds(fileID)
+	if !found {
+		return 0
+	}
+	dimensions := maxBounds.Sub(minBounds)
+	return float64(max(dimensions[0], dimensions[1], dimensions[2]))
+}
+
 func sum(s []int32) (result int32) {
 	result = 0
 	for _, val := range s {
@@ -2177,79 +3187,148 @@ func (pv *UnitPreviewState) initDrawList(hash stingray.FileID, name string) {
 
 func (pv *UnitPreviewState) drawLists(size imgui.Vec2, model, view, projection mgl32.Mat4, viewPosition mgl32.Vec3) {
 	gl.Enable(gl.DEPTH_TEST)
+	blendingWasEnabled := gl.IsEnabled(gl.BLEND)
+	gl.Enable(gl.BLEND)
+	gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+	cullingEnabled := false
+	if pv.thumbnailFlat {
+		cullingEnabled = gl.IsEnabled(gl.CULL_FACE)
+		gl.Disable(gl.CULL_FACE)
+	}
 	sortedFileIds := slices.SortedFunc(maps.Keys(pv.objects), func(a, b stingray.FileID) int {
 		return stingray.Hash.Cmp(a.Name, b.Name)
 	})
-	for _, fileId := range sortedFileIds {
-		sortedMeshes := slices.Sorted(maps.Keys(pv.objects[fileId]))
-		for _, mesh := range sortedMeshes {
-			list := pv.objectDrawList[fileId][mesh]
-			instanceCount := int32(len(list)) / (7 * 4)
-			object := pv.objects[fileId][mesh]
-
-			gl.BindVertexArray(object.vao)
-			if instanceCount > 0 && instanceCount != object.numInstances {
-				gl.BindBuffer(gl.ARRAY_BUFFER, object.imbo)
-				gl.BufferData(gl.ARRAY_BUFFER, len(list)*4, gl.Ptr(list), gl.STATIC_DRAW)
-				object.numInstances = instanceCount
-			} else if instanceCount != object.numInstances {
-				object.numInstances = instanceCount
-			}
-			pv.objects[fileId][mesh] = object
-			if object.numInstances == 0 {
+	passes := 1
+	if !pv.thumbnailFlat && !pv.showWireframe {
+		passes = 2
+	}
+	for pass := range passes {
+		drawingOverlays := pass == 1
+		gl.DepthMask(!drawingOverlays)
+		for _, fileId := range sortedFileIds {
+			overlayKind := pv.sceneOverlayKind(fileId, "")
+			if pv.rootHash.Type == LEVEL && overlayKind != SceneOverlayNone && !pv.SceneOverlayVisible(overlayKind) {
 				continue
 			}
+			if passes == 2 && (overlayKind != SceneOverlayNone) != drawingOverlays {
+				continue
+			}
+			sortedMeshes := slices.Sorted(maps.Keys(pv.objects[fileId]))
+			for _, mesh := range sortedMeshes {
+				list := pv.objectDrawList[fileId][mesh]
+				instanceCount := int32(len(list)) / (7 * 4)
+				object := pv.objects[fileId][mesh]
 
-			if pv.showWireframe {
-				if !object.wireframe.Use() {
+				gl.BindVertexArray(object.vao)
+				if instanceCount > 0 && instanceCount != object.numInstances {
+					gl.BindBuffer(gl.ARRAY_BUFFER, object.imbo)
+					gl.BufferData(gl.ARRAY_BUFFER, len(list)*4, gl.Ptr(list), gl.STATIC_DRAW)
+					object.numInstances = instanceCount
+				} else if instanceCount != object.numInstances {
+					object.numInstances = instanceCount
+				}
+				pv.objects[fileId][mesh] = object
+				if object.numInstances == 0 {
 					continue
 				}
-				if err := object.wireframe.SetUniform("model", 1, model); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
-					panic(err)
+				animationSkinning := int32(0)
+				if pv.animationEnabled && object.animSkinBuffer != 0 && object.animNormalBuffer != 0 {
+					animationSkinning = 1
+					gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 5, object.animSkinBuffer)
+					gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 6, object.animNormalBuffer)
+				} else {
+					gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 5, 0)
+					gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 6, 0)
 				}
-				if err := object.wireframe.SetUniform("view", 1, view); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
-					panic(err)
-				}
-				if err := object.wireframe.SetUniform("projection", 1, projection); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
-					panic(err)
-				}
-				if err := object.wireframe.SetUniform("color", 1, pv.wireframeColor); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
-					panic(err)
-				}
-				if err := object.wireframe.SetUniform("hasVisibilityMasks", 1, &object.hasVisibilityMasks); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
-					panic(err)
-				}
-				if err := object.wireframe.SetUniform("udimShown[0]", 64, &pv.udimsShown[0]); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
-					panic(err)
-				}
-			}
-			for group, ibo := range object.ibos {
-				if !pv.showWireframe {
-					if group >= len(object.materials) {
+
+				if pv.thumbnailFlat {
+					if !pv.boundingBoxMaterial.Use() {
 						continue
 					}
-					if !object.materials[group].Use() {
+					if err := pv.boundingBoxMaterial.SetUniform("model", 1, model); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+						panic(err)
+					}
+					if err := pv.boundingBoxMaterial.SetUniform("view", 1, view); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+						panic(err)
+					}
+					if err := pv.boundingBoxMaterial.SetUniform("projection", 1, projection); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+						panic(err)
+					}
+					if err := pv.boundingBoxMaterial.SetUniform("color", 1, mgl32.Vec4{0.78, 0.81, 0.86, 1}); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+						panic(err)
+					}
+				} else if pv.showWireframe {
+					if !object.wireframe.Use() {
 						continue
 					}
-					if err := object.materials[group].SetUniform("model", 1, model); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+					if err := object.wireframe.SetUniform("model", 1, model); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 						panic(err)
 					}
-					if err := object.materials[group].SetUniform("view", 1, view); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+					if err := object.wireframe.SetUniform("view", 1, view); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 						panic(err)
 					}
-					if err := object.materials[group].SetUniform("projection", 1, projection); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+					if err := object.wireframe.SetUniform("projection", 1, projection); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 						panic(err)
 					}
-					if err := object.materials[group].SetUniform("viewPosition", 1, viewPosition); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+					if err := object.wireframe.SetUniform("useAnimationSkinning", 1, &animationSkinning); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 						panic(err)
 					}
-					if err := object.materials[group].SetUniform("udimShown[0]", 64, &pv.udimsShown[0]); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+					if err := object.wireframe.SetUniform("color", 1, pv.wireframeColor); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+						panic(err)
+					}
+					if err := object.wireframe.SetUniform("hasVisibilityMasks", 1, &object.hasVisibilityMasks); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+						panic(err)
+					}
+					if err := object.wireframe.SetUniform("udimShown[0]", 64, pv.udimsShownFor(fileId)); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 						panic(err)
 					}
 				}
-				gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo)
-				gl.DrawElementsInstanced(gl.TRIANGLES, object.numIndices[group], object.indexType[group], nil, instanceCount)
+				for group, ibo := range object.ibos {
+					if pv.thumbnailFlat && (group >= len(object.materials) || !object.materials[group].Shown()) {
+						continue
+					}
+					if !pv.showWireframe && !pv.thumbnailFlat {
+						if group >= len(object.materials) {
+							continue
+						}
+						if !object.materials[group].Use() {
+							continue
+						}
+						overlayOpacity := sceneOverlayOpacity(overlayKind)
+						if err := object.materials[group].SetUniform("previewOpacity", 1, &overlayOpacity); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+							panic(err)
+						}
+						if err := object.materials[group].SetUniform("model", 1, model); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+							panic(err)
+						}
+						if err := object.materials[group].SetUniform("view", 1, view); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+							panic(err)
+						}
+						if err := object.materials[group].SetUniform("projection", 1, projection); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+							panic(err)
+						}
+						if err := object.materials[group].SetUniform("viewPosition", 1, viewPosition); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+							panic(err)
+						}
+						if err := object.materials[group].SetUniform("useAnimationSkinning", 1, &animationSkinning); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+							panic(err)
+						}
+						if err := object.materials[group].SetUniform("udimShown[0]", 64, pv.udimsShownFor(fileId)); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+							panic(err)
+						}
+					}
+					gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo)
+					gl.DrawElementsInstanced(gl.TRIANGLES, object.numIndices[group], object.indexType[group], nil, instanceCount)
+				}
 			}
+		}
+	}
+	gl.DepthMask(true)
+	if pv.thumbnailFlat {
+		if cullingEnabled {
+			gl.Enable(gl.CULL_FACE)
+		} else {
+			gl.Disable(gl.CULL_FACE)
 		}
 	}
 	gl.ActiveTexture(gl.TEXTURE0)
@@ -2259,6 +3338,9 @@ func (pv *UnitPreviewState) drawLists(size imgui.Vec2, model, view, projection m
 	gl.BindVertexArray(0)
 	gl.UseProgram(0)
 	gl.PolygonMode(gl.FRONT_AND_BACK, gl.FILL)
+	if !blendingWasEnabled {
+		gl.Disable(gl.BLEND)
+	}
 }
 
 func (pv *UnitPreviewState) drawListsNormalVis(size imgui.Vec2, model, view, projection mgl32.Mat4) {
@@ -2285,6 +3367,15 @@ func (pv *UnitPreviewState) drawListsNormalVis(size imgui.Vec2, model, view, pro
 			if object.numInstances == 0 {
 				continue
 			}
+			animationSkinning := int32(0)
+			if pv.animationEnabled && object.animSkinBuffer != 0 && object.animNormalBuffer != 0 {
+				animationSkinning = 1
+				gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 5, object.animSkinBuffer)
+				gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 6, object.animNormalBuffer)
+			} else {
+				gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 5, 0)
+				gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 6, 0)
+			}
 
 			if !object.normalVis.Use() {
 				continue
@@ -2299,6 +3390,9 @@ func (pv *UnitPreviewState) drawListsNormalVis(size imgui.Vec2, model, view, pro
 			if err := object.normalVis.SetUniform("projection", 1, projection); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 				panic(err)
 			}
+			if err := object.normalVis.SetUniform("useAnimationSkinning", 1, &animationSkinning); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+				panic(err)
+			}
 			normalLength := pv.viewDistance * 0.02
 			if err := object.normalVis.SetUniform("len", 1, &normalLength); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 				panic(err)
@@ -2309,7 +3403,7 @@ func (pv *UnitPreviewState) drawListsNormalVis(size imgui.Vec2, model, view, pro
 			if err := object.normalVis.SetUniform("hasVisibilityMasks", 1, &object.hasVisibilityMasks); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 				panic(err)
 			}
-			if err := object.normalVis.SetUniform("udimShown[0]", 64, &pv.udimsShown[0]); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
+			if err := object.normalVis.SetUniform("udimShown[0]", 64, pv.udimsShownFor(fileId)); err != nil && err != preview_mats.UNIFORM_NOT_FOUND {
 				panic(err)
 			}
 			for group, ibo := range object.ibos {
@@ -2458,18 +3552,20 @@ func (pv *UnitPreviewState) drawSkeleton(hash stingray.FileID, matrix, _ mgl32.M
 	pv.objectDrawList[hash][filediverSkeleton] = append(pv.objectDrawList[hash][filediverSkeleton], make([]float32, 12)...)
 }
 
-func (pv *UnitPreviewState) getDrawNodeRecursiveFunc(drawCallback func(stingray.FileID, mgl32.Mat4, mgl32.Mat4), sceneModel mgl32.Mat4) (drawNode func(unitPreviewNode, stingray.FileID)) {
-	drawNode = func(curr unitPreviewNode, nodeId stingray.FileID) {
+func (pv *UnitPreviewState) getDrawNodeRecursiveFunc(drawCallback func(stingray.FileID, mgl32.Mat4, mgl32.Mat4), sceneModel mgl32.Mat4) (drawNode func(unitPreviewNode, stingray.FileID, mgl32.Mat4)) {
+	drawNode = func(curr unitPreviewNode, nodeId stingray.FileID, matrix mgl32.Mat4) {
 		if !curr.shown {
+			return
+		}
+		if pv.rootHash.Type == LEVEL && curr.overlayKind != SceneOverlayNone && !pv.SceneOverlayVisible(curr.overlayKind) {
 			return
 		}
 		for _, childHash := range curr.children {
 			if child, contains := pv.nodes[childHash.Name]; contains && nodeId != childHash {
-				child.matrix = curr.matrix.Mul4(child.matrix)
-				drawNode(child, childHash)
+				drawNode(child, childHash, matrix.Mul4(child.matrix))
 			} else {
 				// add to the draw list
-				drawCallback(childHash, curr.matrix, sceneModel)
+				drawCallback(childHash, matrix, sceneModel)
 			}
 		}
 	}
@@ -2485,7 +3581,11 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 	defer imgui.PopID()
 
 	viewSize := imgui.ContentRegionAvail()
-	viewSize.Y -= imutils.CheckboxHeight()
+	if pv.captureMode {
+		viewSize = imgui.NewVec2(512, 512)
+	} else {
+		viewSize.Y -= imutils.CheckboxHeight()
+	}
 
 	if pv.animTime == -1 || pv.animTime >= 1 {
 		pv.animOrigViewDistance = pv.viewDistance
@@ -2496,6 +3596,9 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 
 	widgets.GLView(previewId, pv.fb, viewSize,
 		func() {
+			if pv.captureMode {
+				return
+			}
 			io := imgui.CurrentIO()
 
 			if imgui.IsItemActive() {
@@ -2537,27 +3640,35 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 		func(pos, size imgui.Vec2) {
 			gl.ClearColor(0.2, 0.2, 0.2, 1)
 			gl.Clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+			if err := pv.finalizeObjectMaterials(); err != nil {
+				fmt.Printf("[warning] finalizing preview textures: %v\n", err)
+			}
+			if pv.animationEnabled {
+				pv.updateAnimationPose()
+			}
 
 			modelPos, viewPosition, view, projection := pv.computeMVP(size.X/size.Y, true)
-			translation := mgl32.Translate3D(modelPos.Vec3().Elem())
-			sceneModel := pv.model.Mul4(translation)
+			sceneModel := pv.previewSceneModelMatrix(modelPos)
 
 			drawNode := pv.getDrawNodeRecursiveFunc(pv.drawObject, sceneModel)
 			drawNodeBoundingBox := pv.getDrawNodeRecursiveFunc(pv.drawBoundingBox, mgl32.Mat4{})
 			drawNodeSkeletons := pv.getDrawNodeRecursiveFunc(pv.drawSkeleton, mgl32.Mat4{})
-			drawNode(pv.root, pv.rootHash)
+			drawNode(pv.root, pv.rootHash, pv.root.matrix)
 			pv.drawLists(size, sceneModel, view, projection, viewPosition)
 			if pv.visualizeNormals {
 				pv.drawListsNormalVis(size, sceneModel, view, projection)
 			}
 			pv.objectDrawList = nil
 			if pv.showAABB {
-				drawNodeBoundingBox(pv.root, pv.rootHash)
+				drawNodeBoundingBox(pv.root, pv.rootHash, pv.root.matrix)
 				pv.drawListsBoundingBoxes(size, sceneModel, view, projection)
 				pv.objectDrawList = nil
 			}
+			if !pv.captureMode && pv.rootHash.Type == UNIT && (pv.showPhysicsHitboxes || pv.showDamageBoxes) && pv.damageOverlayLoaded {
+				pv.drawDamageOverlayBoxes(pv.previewBaseSceneModelMatrix(modelPos), view, projection)
+			}
 			if pv.showSkeleton {
-				drawNodeSkeletons(pv.root, pv.rootHash)
+				drawNodeSkeletons(pv.root, pv.rootHash, pv.root.matrix)
 				pv.drawListsSkeletons(size, sceneModel, view, projection)
 				pv.objectDrawList = nil
 			}
@@ -2569,15 +3680,18 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 				pv.viewDistance = pv.maxViewDistance
 
 				_, viewPosition, view, projection := pv.computeMVP(size.X/size.Y, false)
+				sceneModel := pv.previewSceneModelMatrix(pv.modelPos)
 
-				fitVertexCamDistDelta := func(vertex mgl32.Vec3) float32 {
-					v := vertex.Vec4(1.0)
-					v = pv.model.Mul4x1(v)
-
-					// NOTE(xypwn): I think the projections are still off, but
-					// this whole code seems to at least do what I wanted it
-					// to now.
+				fitVertexCamDistDelta := func(vertex mgl32.Vec3) (float32, bool) {
+					v := sceneModel.Mul4x1(vertex.Vec4(1.0))
+					if v.W() == 0 {
+						return 0, false
+					}
+					v = v.Mul(1 / v.W())
 					projV := projection.Mul4x1(view.Mul4x1(v))
+					if projV.W() <= 0 || math.IsNaN(float64(projV.W())) || math.IsInf(float64(projV.W()), 0) {
+						return 0, false
+					}
 					projV = projV.Mul(1 / projV.W())
 
 					// Component with maximum distance from screen center
@@ -2592,27 +3706,49 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 						camToVert := vert.Vec3().Sub(viewPosition)
 						od = viewDir.Dot(camToVert)
 					}
+					if od <= 0 || math.IsNaN(float64(od)) || math.IsInf(float64(od), 0) || math.IsNaN(float64(maxDist)) || math.IsInf(float64(maxDist), 0) {
+						return 0, false
+					}
 
 					// Fit model to screen
-					return od * (maxDist - 1)
+					return od * (maxDist - 1), true
 				}
 
-				maxCamDistDelta := float32(-math.MaxFloat32)
-				for nodeName, node := range pv.nodes {
-					hash, contains := pv.getNodeUnitFileID(nodeName)
-					if !contains {
-						continue
+				var maxCamDistDelta float32
+				hasFitVertex := false
+				var fitVisibleNode func(unitPreviewNode, stingray.FileID, mgl32.Mat4)
+				fitVisibleNode = func(curr unitPreviewNode, nodeId stingray.FileID, matrix mgl32.Mat4) {
+					if !curr.shown {
+						return
 					}
-					for name := range pv.objects[hash] {
-						positions := pv.getAABBVertices(hash, name)
-						for _, vert := range positions {
-							maxCamDistDelta = max(maxCamDistDelta,
-								fitVertexCamDistDelta(node.matrix.Mul4(pv.aabbMat[hash][name]).Mul4x1(vert.Vec4(1.0)).Vec3()))
+					for _, childHash := range curr.children {
+						if child, contains := pv.nodes[childHash.Name]; contains && nodeId != childHash {
+							fitVisibleNode(child, childHash, matrix.Mul4(child.matrix))
+							continue
+						}
+						for name := range pv.objects[childHash] {
+							if shown, exists := pv.objectsShown[childHash][name]; exists && !shown {
+								continue
+							}
+							boundsMatrix := matrix.Mul4(pv.aabbMat[childHash][name])
+							for _, vert := range pv.getAABBVertices(childHash, name) {
+								delta, ok := fitVertexCamDistDelta(boundsMatrix.Mul4x1(vert.Vec4(1.0)).Vec3())
+								if !ok {
+									continue
+								}
+								if !hasFitVertex || delta > maxCamDistDelta {
+									maxCamDistDelta = delta
+									hasFitVertex = true
+								}
+							}
 						}
 					}
 				}
-				pv.viewDistance += maxCamDistDelta
-				pv.viewDistance *= 1.02
+				fitVisibleNode(pv.root, pv.rootHash, pv.root.matrix)
+				if hasFitVertex {
+					pv.viewDistance += maxCamDistDelta
+					pv.viewDistance *= 1.02
+				}
 
 				pv.doAutoZoomNextFrame = false
 
@@ -2620,7 +3756,13 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 			}
 		},
 		func(pos, size imgui.Vec2) {
+			if pv.captureMode {
+				return
+			}
 			dl := imgui.WindowDrawList()
+			if pv.showDamageReadout && pv.rootHash.Type == UNIT && pv.damageOverlayLoaded {
+				pv.drawDamageOverlayReadouts(dl, pos, size)
+			}
 
 			// Scale indicator
 			{
@@ -2701,7 +3843,6 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 			}
 
 			modelPos, _, view, projection := pv.computeMVP(size.X/size.Y, false)
-			translation := mgl32.Translate3D(modelPos.Vec3().Elem())
 			// Show axes
 			{
 				// Mirror across the x axis
@@ -2751,6 +3892,7 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 				dl.AddLineArgs(origin, z, imgui.ColorConvertFloat4ToU32(blue), 1.5)
 				dl.AddLineArgs(origin, y, imgui.ColorConvertFloat4ToU32(green), 1.5)
 			}
+			sceneModelForNormals := pv.previewSceneModelMatrix(modelPos)
 
 			// Show hovered vertex info
 			if pv.visualizeNormals {
@@ -2779,7 +3921,7 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 								if len(pv.meshPositions[childHash][name]) != len(pv.meshNormals[childHash][name]) {
 									continue
 								}
-								model := pv.model.Mul4(translation.Mul4(curr.matrix.Mul4(pv.objects[childHash][name].matrix)))
+								model := sceneModelForNormals.Mul4(curr.matrix.Mul4(pv.objects[childHash][name].matrix))
 								normalMat := model.Inv().Transpose().Mat3()
 								mvp := projection.Mul4(view).Mul4(model)
 								for i, vtx := range pv.meshPositions[childHash][name] {
@@ -2816,6 +3958,13 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 		},
 	)
 
+	if pv.captureMode {
+		if pv.animTime != -1 {
+			pv.animTime += 20 * imgui.CurrentIO().DeltaTime()
+		}
+		return
+	}
+
 	if imgui.Button(fnt.I.Home) {
 		pv.viewRotation = mgl32.Vec2{math.Pi, 0.0}
 		pv.modelPos = mgl32.Vec4{0, 0, 0, 1}
@@ -2833,24 +3982,29 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 	}
 	imgui.SetItemTooltip("Reset view")
 	imgui.SameLine()
-	if imgui.Button(fnt.I.DataObject) {
+	if imgui.Button(fnt.I.DataObject + " Debug info") {
 		imgui.OpenPopupStr("Debug info")
 	}
-	imgui.SetItemTooltip("Mesh debug info...")
+	imgui.SetItemTooltip("Mesh information, display settings, and damage-state controls")
 	if imgui.BeginPopup("Debug info") {
 		imgui.TextUnformatted("Mesh info")
 		imgui.Indent()
-		var numVertices, numIndices int = 0, 0
+		var numVertices, numIndices, numTriangles int = 0, 0, 0
 		for hash := range pv.objects {
 			for name := range pv.objects[hash] {
+				if shown, ok := pv.objectsShown[hash][name]; ok && !shown {
+					continue
+				}
 				numVertices += int(pv.objects[hash][name].numVertices)
-				indexCount := sum(pv.objects[hash][name].numIndices)
-				numIndices += int(indexCount)
+				for _, indexCount := range pv.objects[hash][name].numIndices {
+					numIndices += int(indexCount)
+					numTriangles += int(indexCount / 3)
+				}
 			}
 		}
-		imutils.Textf("Indices: %v", numIndices)
 		imutils.Textf("Vertices: %v", numVertices)
-		imutils.Textf("Triangles: %v", numIndices/3)
+		imutils.Textf("Triangles: %v", numTriangles)
+		imutils.Textf("Indices: %v", numIndices)
 		imgui.Unindent()
 
 		imgui.Separator()
@@ -2892,11 +4046,48 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 		}
 		imgui.Unindent()
 
+		imgui.Separator()
+		imgui.TextUnformatted("Damage state")
+		pv.drawDamageModelControl()
+
 		imgui.EndPopup()
 	}
 	imgui.SameLine()
+	pv.drawDamageOverlayControls()
+	imgui.SameLine()
 	if imgui.Checkbox(fnt.I.AllOut+" Auto-zoom", &pv.autoZoomEnabled) && pv.autoZoomEnabled {
 		pv.doAutoZoomNextFrame = true
+	}
+	imgui.SameLine()
+	imgui.BeginDisabledV(pv.isHelldivers1 || pv.rootHash.Type != UNIT)
+	showMountedAttachments := pv.mountedAttachmentsEnabled
+	if imgui.Checkbox("Mounted models", &showMountedAttachments) {
+		if err := pv.SetMountedAttachmentsEnabled(showMountedAttachments); err != nil {
+			fmt.Printf("showing mounted models: %v\n", err)
+		}
+	}
+	imgui.EndDisabled()
+	tooltip := "Load models referenced by this unit's mount records and place them on their named skeleton bones."
+	if pv.isHelldivers1 {
+		tooltip = "Mounted-model records are only available for Helldivers 2 units."
+	} else if pv.rootHash.Type != UNIT {
+		tooltip = "Select a unit file to show its mounted models."
+	} else if warnings := pv.mountedAttachmentWarningsText(); warnings != "" {
+		tooltip += "\n\n" + warnings
+	}
+	imgui.SetItemTooltip(tooltip)
+	if pv.maxLODLevel > 0 {
+		imgui.SameLine()
+		imgui.SetNextItemWidth(imutils.S(130))
+		selectedLOD := int32(pv.lodLevel)
+		if imgui.SliderInt("LOD", &selectedLOD, 0, int32(pv.maxLODLevel)) {
+			if err := pv.SetLOD(int(selectedLOD)); err != nil {
+				fmt.Printf("changing preview LOD: %v\n", err)
+			} else {
+				pv.doAutoZoomNextFrame = true
+				pv.animTime = 0
+			}
+		}
 	}
 
 	imgui.SameLine()
@@ -2923,6 +4114,7 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 			}
 		}
 	}
+	pv.syncRootVisibilityMasks()
 
 	imgui.SameLine()
 	label = "Tree View"
@@ -2934,9 +4126,54 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 	if imgui.Button(label) {
 		pv.treeViewShown = !pv.treeViewShown
 	}
+	if pv.rootHash.Type == LEVEL {
+		imgui.SameLine()
+		if imgui.Button("Visibility") {
+			imgui.OpenPopupStr("##LevelVisibility")
+		}
+		imgui.SetItemTooltip("Level visibility options")
+		if imgui.BeginPopup("##LevelVisibility") {
+			hideGround := pv.hideLevelGround
+			if imgui.Checkbox("Hide ground patch", &hideGround) {
+				pv.SetHideLevelGround(hideGround)
+			}
+			imgui.SetItemTooltip("Hide the generated terrain patch used as the level's ground preview.")
+
+			volumeVisible := pv.SceneOverlayVisible(SceneOverlayVolumes)
+			if imgui.Checkbox("Level volume helpers", &volumeVisible) {
+				pv.SetSceneOverlayVisible(SceneOverlayVolumes, volumeVisible)
+			}
+			imgui.SetItemTooltip("Show or hide tutorial triggers, kill zones, and landing-zone markers.")
+
+			audioVolumesVisible := pv.SceneOverlayVisible(SceneOverlayAudioVolumes)
+			if imgui.Checkbox("Audio volumes and portals", &audioVolumesVisible) {
+				pv.SetSceneOverlayVisible(SceneOverlayAudioVolumes, audioVolumesVisible)
+			}
+			imgui.SetItemTooltip("Show or hide Wwise audio volumes, portals, and reverb regions. These colored boxes mark spatial audio areas, not solid map structures.")
+
+			avoidanceVolumesVisible := pv.SceneOverlayVisible(SceneOverlayAvoidanceVolumes)
+			if imgui.Checkbox("Hellpod avoidance boxes", &avoidanceVolumesVisible) {
+				pv.SetSceneOverlayVisible(SceneOverlayAvoidanceVolumes, avoidanceVolumesVisible)
+			}
+			imgui.SetItemTooltip("Show or hide the primitive boxes that mark areas where hellpods cannot land. These are gameplay placement helpers, not solid map structures.")
+
+			rendererHelpersVisible := pv.SceneOverlayVisible(SceneOverlayRendererHelpers)
+			if imgui.Checkbox("Renderer helper volumes", &rendererHelpersVisible) {
+				pv.SetSceneOverlayVisible(SceneOverlayRendererHelpers, rendererHelpersVisible)
+			}
+			imgui.SetItemTooltip("Show or hide Stingray editor helper meshes such as occluders and reflection probes.")
+
+			decalBoxesVisible := pv.SceneOverlayVisible(SceneOverlayDecalBoxes)
+			if imgui.Checkbox("Decal projection boxes", &decalBoxesVisible) {
+				pv.SetSceneOverlayVisible(SceneOverlayDecalBoxes, decalBoxesVisible)
+			}
+			imgui.SetItemTooltip("Show or hide the decal_box and decal_box_long_range meshes. The game uses these as projection bounds rather than solid geometry.")
+			imgui.EndPopup()
+		}
+	}
 
 	if pv.animTime != -1 {
-		pv.animTime += 5 * imgui.CurrentIO().DeltaTime()
+		pv.animTime += 20 * imgui.CurrentIO().DeltaTime()
 	}
 
 	// We sweep the textures here so we aren't modifying opengl state during a draw call
@@ -3040,22 +4277,27 @@ func (pv *UnitPreviewState) Draw(previewId string) {
 	}
 
 	if len(pv.previousSelectedArchives) != len(currentArchives) {
-		for hash := range pv.objects {
-			for name := range pv.objects[hash] {
-				armorInfo := pv.getArmorInfo(pv.objects[hash][name].name)
-				for group := range pv.objects[hash][name].materials {
-					material := pv.objects[hash][name].materials[group]
-					mat, _ := loadMaterialInfo(pv.getResource, material.ID())
-					overrideLUTMaterial(mat, armorInfo, pv.selectedCamo)
-					material = pv.ml.LoadMaterial(material.ID(), material.Name(), material.Shown(), mat, material, hash)
-					pv.objects[hash][name].materials[group] = material
-				}
-			}
-		}
-		pv.finalizeObjectMaterials()
-
+		pv.reapplyArmorMaterials()
 		pv.previousSelectedArchives = currentArchives
 	}
+}
+
+// reapplyArmorMaterials reloads every shown material with the LUT override that the current
+// archive selection / armor context gives.
+func (pv *UnitPreviewState) reapplyArmorMaterials() {
+	for hash := range pv.objects {
+		for name := range pv.objects[hash] {
+			armorInfo := pv.getArmorInfo(pv.objects[hash][name].name)
+			for group := range pv.objects[hash][name].materials {
+				material := pv.objects[hash][name].materials[group]
+				mat, _ := loadMaterialInfo(pv.getResource, material.ID())
+				overrideLUTMaterial(mat, armorInfo, pv.selectedCamo)
+				material = pv.ml.LoadMaterial(material.ID(), material.Name(), material.Shown(), mat, material, hash)
+				pv.objects[hash][name].materials[group] = material
+			}
+		}
+	}
+	pv.finalizeObjectMaterials()
 }
 
 func (pv *UnitPreviewState) DrawSettings() {
@@ -3188,6 +4430,7 @@ func (pv *UnitPreviewState) drawVisibilityMaskSelector() {
 		nextHoveredUDimListItem := int32(-1)
 		if imgui.Button("Reset") {
 			pv.udimsSelected = pv.udimsShownDefault
+			pv.damageModelSelection = damageModelIntact
 		}
 		imgui.Separator()
 		imgui.PushStyleVarVec2(imgui.StyleVarItemSpacing,
@@ -3215,6 +4458,9 @@ func (pv *UnitPreviewState) drawVisibilityMaskSelector() {
 				pv.udimsShown[i] = 0
 			}
 			if imgui.IsMouseReleased(imgui.MouseButtonLeft) {
+				if pv.udimsSelected[i] != selected {
+					pv.damageModelSelection = damageModelCustom
+				}
 				pv.udimsSelected[i] = selected
 			}
 			var icon string

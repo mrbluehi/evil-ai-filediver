@@ -131,7 +131,8 @@ func DecodeInfo(r io.Reader) (Info, error) {
 			info.ColorModel = color.NRGBAModel
 			info.Decompress = DecompressDXT1
 		case [4]byte{'D', 'X', 'T', '3'}:
-			return Info{}, errors.New("DXT3 compression unsupported")
+			info.ColorModel = color.NRGBAModel
+			info.Decompress = DecompressDXT3
 		case [4]byte{'D', 'X', 'T', '5'}:
 			info.ColorModel = color.NRGBAModel
 			info.Decompress = DecompressDXT5
@@ -161,15 +162,17 @@ func DecodeInfo(r io.Reader) (Info, error) {
 			case DXGIFormatR8UNorm:
 				info.ColorModel = color.GrayModel
 				info.Decompress = DecompressUncompressedDXT10
-			case DXGIFormatR8G8B8A8UNorm, DXGIFormatB8G8R8A8UNorm:
+			case DXGIFormatR8G8B8A8UNorm, DXGIFormatR8G8B8A8UNormSRGB,
+				DXGIFormatB8G8R8A8UNorm, DXGIFormatB8G8R8A8UNormSRGB:
 				info.ColorModel = color.NRGBAModel
 				info.Decompress = DecompressUncompressedDXT10
-			case DXGIFormatBC1UNorm:
+			case DXGIFormatBC1UNorm, DXGIFormatBC1UNormSRGB:
 				info.ColorModel = color.NRGBAModel
 				info.Decompress = DecompressDXT1
-			case DXGIFormatBC2UNorm:
-				return Info{}, errors.New("DXT3 compression unsupported")
-			case DXGIFormatBC3UNorm:
+			case DXGIFormatBC2UNorm, DXGIFormatBC2UNormSRGB:
+				info.ColorModel = color.NRGBAModel
+				info.Decompress = DecompressDXT3
+			case DXGIFormatBC3UNorm, DXGIFormatBC3UNormSRGB:
 				info.ColorModel = color.NRGBAModel
 				info.Decompress = DecompressDXT5
 			case DXGIFormatBC4UNorm:
@@ -178,11 +181,9 @@ func DecodeInfo(r io.Reader) (Info, error) {
 			case DXGIFormatBC5UNorm:
 				info.ColorModel = color.NRGBAModel
 				info.Decompress = Decompress3Dc
-			case DXGIFormatBC7UNorm:
+			case DXGIFormatBC7UNorm, DXGIFormatBC7UNormSRGB:
 				info.ColorModel = color.NRGBAModel
 				info.Decompress = DecompressBC7
-			case DXGIFormatBC7UNormSRGB:
-				return Info{}, errors.New("BC7 SRGB compression unsupported")
 			default:
 				return Info{}, fmt.Errorf("unsupported DXGI format: %v", dx10.DXGIFormat)
 			}

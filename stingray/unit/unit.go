@@ -227,6 +227,7 @@ const (
 	FormatVec4S8                   MeshLayoutItemFormat = 28
 	FormatVec4R10G10B10A2_TYPELESS MeshLayoutItemFormat = 29
 	FormatVec4R10G10B10A2_UNORM    MeshLayoutItemFormat = 30
+	FormatVec4R10G10B10A2_UINT     MeshLayoutItemFormat = 31
 	FormatF16                      MeshLayoutItemFormat = 32
 	FormatVec2F16                  MeshLayoutItemFormat = 33
 	FormatVec3F16                  MeshLayoutItemFormat = 34
@@ -265,6 +266,8 @@ func (v MeshLayoutItemFormat) String() string {
 		return "packed32"
 	case FormatVec4R10G10B10A2_UNORM:
 		return "packed32u"
+	case FormatVec4R10G10B10A2_UINT:
+		return "packed32uint"
 	case FormatF16:
 		return "float16"
 	case FormatVec2F16:
@@ -310,6 +313,8 @@ func (v MeshLayoutItemFormat) Size() int {
 		return 4
 	case FormatVec4R10G10B10A2_UNORM:
 		return 4
+	case FormatVec4R10G10B10A2_UINT:
+		return 4
 	case FormatF16:
 		return 2
 	case FormatVec2F16:
@@ -342,6 +347,8 @@ func (v MeshLayoutItemFormat) ComponentType() gltf.ComponentType {
 	case FormatVec3U32:
 		return gltf.ComponentUint
 	case FormatVec4U32:
+		return gltf.ComponentUint
+	case FormatVec4R10G10B10A2_UINT:
 		return gltf.ComponentUint
 	case FormatS8:
 		return gltf.ComponentUbyte
@@ -387,6 +394,8 @@ func (v MeshLayoutItemFormat) Type() gltf.AccessorType {
 	case FormatVec3U32:
 		return gltf.AccessorVec3
 	case FormatVec4U32:
+		return gltf.AccessorVec4
+	case FormatVec4R10G10B10A2_UINT:
 		return gltf.AccessorVec4
 	case FormatS8:
 		return gltf.AccessorScalar
@@ -588,15 +597,127 @@ type Info struct {
 	JointTransformMatrices [][4][4]float32
 	Lights                 []Light
 	Materials              map[stingray.ThinHash]stingray.Hash
-	NumMeshes              uint32
-	MeshInfos              []MeshInfo
-	TerrainInfos           []TerrainInfo
-	GroupBones             []stingray.ThinHash
-	MeshLayouts            []MeshLayout
+	// MaterialNames holds the original material slot strings for formats that
+	// store names instead of material resource paths (Helldivers 1).
+	MaterialNames map[stingray.ThinHash]string
+	NumMeshes     uint32
+	MeshInfos     []MeshInfo
+	TerrainInfos  []TerrainInfo
+	GroupBones    []stingray.ThinHash
+	MeshLayouts   []MeshLayout
+}
+
+func legacyMeshLayoutFormat(format MeshLayoutItemFormat) (MeshLayoutItemFormat, bool) {
+	switch format {
+	case 0, 1, 2, 3, 4:
+		return format, true
+	case 17:
+		return FormatU32, true
+	case 18:
+		return FormatVec2U32, true
+	case 19:
+		return FormatVec3U32, true
+	case 20:
+		return FormatVec4U32, true
+	case 24:
+		return FormatVec4S8, true
+	case 25:
+		return FormatVec4R10G10B10A2_TYPELESS, true
+	case 26:
+		return FormatVec4R10G10B10A2_UNORM, true
+	case 28:
+		return FormatF16, true
+	case 29:
+		return FormatVec2F16, true
+	case 30:
+		return FormatVec3F16, true
+	case 31:
+		return FormatVec4F16, true
+	default:
+		return format, false
+	}
+}
+
+func usesLegacyMeshLayoutFormats(layout MeshLayout) bool {
+	var legacySize, currentSize int
+	legacyValid, currentValid := true, true
+	for _, item := range layout.Items[:layout.NumItems] {
+		currentItemSize := item.Format.Size()
+		if currentItemSize < 0 {
+			currentValid = false
+		} else {
+			currentSize += currentItemSize
+		}
+
+		legacyFormat, ok := legacyMeshLayoutFormat(item.Format)
+		if !ok || legacyFormat.Size() < 0 {
+			legacyValid = false
+		} else {
+			legacySize += legacyFormat.Size()
+		}
+	}
+	stride := int(layout.VertexStride)
+	if !legacyValid || legacySize > stride {
+		return false
+	}
+	return !currentValid || currentSize > stride || (legacySize == stride && currentSize != stride)
 }
 
 func loadMesh(gpuR io.ReadSeeker, info MeshInfo, layout MeshLayout) (Mesh, error) {
 	var mesh Mesh
+	// Some groups share a vertex range and underreport its size. The indices
+	// are relative to the group's vertex offset and may refer to the remainder
+	// of the layout's vertex buffer (for example, armor torso material groups).
+	// Expand only within the declared buffer; invalid indices still fail cleanly.
+	if layout.NumIndices == 0 && len(info.Groups) > 0 {
+		return Mesh{}, fmt.Errorf("mesh layout has no indices")
+	}
+	info.Groups = append([]MeshGroup(nil), info.Groups...)
+	if layout.NumIndices != 0 {
+		stride := layout.IndicesSize / layout.NumIndices
+		if stride != 2 && stride != 4 {
+			return Mesh{}, fmt.Errorf("unknown index stride: %v", stride)
+		}
+		for groupIndex := range info.Groups {
+			group := &info.Groups[groupIndex]
+			if uint64(group.IndexOffset)+uint64(group.NumIndices) > uint64(layout.NumIndices) || group.VertexOffset > layout.NumVertices {
+				return Mesh{}, fmt.Errorf("mesh group exceeds layout buffer")
+			}
+			if _, err := gpuR.Seek(int64(layout.IndexOffset)+int64(group.IndexOffset)*int64(stride), io.SeekStart); err != nil {
+				return Mesh{}, err
+			}
+			var maxIndex uint32
+			for i := uint32(0); i < group.NumIndices; i++ {
+				var index uint32
+				if stride == 2 {
+					var v uint16
+					if err := binary.Read(gpuR, binary.LittleEndian, &v); err != nil {
+						return Mesh{}, err
+					}
+					index = uint32(v)
+				} else if err := binary.Read(gpuR, binary.LittleEndian, &index); err != nil {
+					return Mesh{}, err
+				}
+				if index > maxIndex {
+					maxIndex = index
+				}
+			}
+			if group.NumIndices > 0 && maxIndex >= layout.NumVertices-group.VertexOffset {
+				return Mesh{}, fmt.Errorf("mesh group index %d exceeds vertex buffer", maxIndex)
+			}
+			if group.NumIndices > 0 && group.NumVertices <= maxIndex {
+				group.NumVertices = maxIndex + 1
+			}
+			if group.NumVertices > layout.NumVertices-group.VertexOffset {
+				return Mesh{}, fmt.Errorf("mesh group vertices exceed vertex buffer")
+			}
+		}
+	}
+	if usesLegacyMeshLayoutFormats(layout) {
+		for i := range layout.Items[:layout.NumItems] {
+			layout.Items[i].Format, _ = legacyMeshLayoutFormat(layout.Items[i].Format)
+		}
+	}
 	var uvCoordLayers uint32 = 1
 	var boneIdxLayers uint32 = 1
 	var colorLayers uint32 = 1
@@ -662,7 +783,13 @@ func loadMesh(gpuR io.ReadSeeker, info MeshInfo, layout MeshLayout) (Mesh, error
 					var tangent mgl32.Vec4
 					var bitangent mgl32.Vec3
 					switch item.Format {
-					case FormatVec4R10G10B10A2_UNORM:
+					case FormatVec2S8:
+						var tmp [2]int8
+						if err := binary.Read(gpuR, binary.LittleEndian, &tmp); err != nil {
+							return Mesh{}, err
+						}
+						normal, tangent, bitangent = DecodeOctahedralNormalS8(tmp)
+					case FormatVec4R10G10B10A2_TYPELESS, FormatVec4R10G10B10A2_UNORM, FormatVec4R10G10B10A2_UINT:
 						var tmp uint32
 						if err := binary.Read(gpuR, binary.LittleEndian, &tmp); err != nil {
 							return Mesh{}, err
@@ -677,26 +804,32 @@ func loadMesh(gpuR io.ReadSeeker, info MeshInfo, layout MeshLayout) (Mesh, error
 							normal[i] = float32(float16.Frombits(tmp[i]).Float32())
 						}
 					default:
-						return Mesh{}, fmt.Errorf("expected normal item to have format packed32u or [4]float16, but got: %v", item.Format)
+						return Mesh{}, fmt.Errorf("expected normal item to have format [2]int8 (octahedral), packed32u, or [4]float16, but got: %v", item.Format)
 					}
 					mesh.Normals = append(mesh.Normals, normal)
 					mesh.Tangents = append(mesh.Tangents, tangent)
 					mesh.Bitangents = append(mesh.Bitangents, bitangent)
-				case 2:
-					if item.Format != FormatVec4F16 {
-						return Mesh{}, fmt.Errorf("expected type 2 item to have format [4]float16, but got: %v", item.Format)
+				case 2, 3:
+					switch item.Format {
+					case FormatVec4F16, FormatVec4R10G10B10A2_TYPELESS, FormatVec4R10G10B10A2_UNORM, FormatVec4R10G10B10A2_UINT:
+					default:
+						return Mesh{}, fmt.Errorf("unsupported tangent item format: %v", item.Format)
 					}
-					//fmt.Println(item.Format)
-					// TODO
-				case 3:
-					if item.Format != FormatVec4F16 {
-						return Mesh{}, fmt.Errorf("expected type 3 item to have format [4]float16, but got: %v", item.Format)
+					if _, err := io.CopyN(io.Discard, gpuR, int64(item.Format.Size())); err != nil {
+						return Mesh{}, err
 					}
-					//fmt.Println(item.Format)
-					// TODO
 				case ItemUVCoords:
 					var val [2]float32
 					switch item.Format {
+					case FormatVec4R10G10B10A2_TYPELESS, FormatVec4R10G10B10A2_UNORM, FormatVec4R10G10B10A2_UINT:
+						var packed uint32
+						if err := binary.Read(gpuR, binary.LittleEndian, &packed); err != nil {
+							return Mesh{}, err
+						}
+						// Packed 10:10:10:2 UV entries store U and V in the
+						// low two normalized 10-bit components.
+						val[0] = float32(packed&0x3ff) / 1023.0
+						val[1] = float32((packed>>10)&0x3ff) / 1023.0
 					case FormatVec2F16:
 						var tmp [2]uint16
 						if err := binary.Read(gpuR, binary.LittleEndian, &tmp); err != nil {
@@ -742,6 +875,20 @@ func loadMesh(gpuR io.ReadSeeker, info MeshInfo, layout MeshLayout) (Mesh, error
 						val[1] = float32((tmp>>10)&0x3ff) / 1023.0
 						val[2] = float32((tmp>>20)&0x3ff) / 1023.0
 						val[3] = 0.0 // float32((tmp>>30)&0x3) / 3.0 // This causes issues with incorrect bone weights
+					case FormatVec4R10G10B10A2_UINT:
+						var tmp uint32
+						if err := binary.Read(gpuR, binary.LittleEndian, &tmp); err != nil {
+							return Mesh{}, err
+						}
+						val[0] = float32(tmp&0x3ff) / 1023.0
+						val[1] = float32((tmp>>10)&0x3ff) / 1023.0
+						val[2] = float32((tmp>>20)&0x3ff) / 1023.0
+					case FormatS8:
+						var tmp int8
+						if err := binary.Read(gpuR, binary.LittleEndian, &tmp); err != nil {
+							return Mesh{}, err
+						}
+						val[0] = max(float32(tmp)/127.0, -1.0)
 					case FormatVec2F16:
 						var tmp [2]uint16
 						if err := binary.Read(gpuR, binary.LittleEndian, &tmp); err != nil {
@@ -771,9 +918,6 @@ func loadMesh(gpuR io.ReadSeeker, info MeshInfo, layout MeshLayout) (Mesh, error
 							return Mesh{}, err
 						}
 						for i := range tmp {
-							if tmp[i] > 0xff {
-								return Mesh{}, fmt.Errorf("unexpected bone index value - %v exceeds max u8 value", tmp[i])
-							}
 							val[i] = uint8(tmp[i])
 						}
 					default:

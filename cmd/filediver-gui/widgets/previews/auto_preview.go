@@ -19,10 +19,12 @@ import (
 	"github.com/xypwn/filediver/dds"
 	"github.com/xypwn/filediver/exec"
 	"github.com/xypwn/filediver/stingray"
+	"github.com/xypwn/filediver/stingray/animation"
 	"github.com/xypwn/filediver/stingray/entity"
 	"github.com/xypwn/filediver/stingray/shading_environment"
 	stingray_strings "github.com/xypwn/filediver/stingray/strings"
 	"github.com/xypwn/filediver/stingray/ttf"
+	"github.com/xypwn/filediver/stingray/unit"
 	"github.com/xypwn/filediver/stingray/unit/material"
 	"github.com/xypwn/filediver/stingray/unit/texture"
 	stingray_wwise "github.com/xypwn/filediver/stingray/wwise"
@@ -33,6 +35,7 @@ type AutoPreviewType int
 const (
 	AutoPreviewEmpty AutoPreviewType = iota
 	AutoPreviewUnit
+	AutoPreviewAnimation
 	AutoPreviewTree
 	AutoPreviewAudio
 	AutoPreviewVideo
@@ -56,16 +59,54 @@ type AutoPreview struct {
 		xaml     *XamlPreview
 		font     *FontPreview
 	}
+	animationUnit       *UnitPreviewState
+	animationUnitSource stingray.FileID
+	entityInfo          *entity.Entity
+	colorGradingID      stingray.FileID
+	levelGallery        *UnitGallery
+	animationData       *animation.Animation
+	animationResources  []stingray.FileID
+	pendingAnimation    *linkedAnimationPreviewRequest
 
 	hashes               map[stingray.Hash]string
 	thinhashes           map[stingray.ThinHash]string
+	isHelldivers1        bool
 	getResourceGenerator GetResourceGeneratorFunc
 	getOverride          func(stingray.FileID) stingray.FileID
+	resolveHD1Material   ResolveHD1MaterialFunc
+	armorParams          ExtractorArmorParameters
+	lookupHash           func(stingray.Hash) string
+	lookupThinHash       func(stingray.ThinHash) string
 	loadMs               uint32
 	drawTime             float64
 	debug                bool
 
 	err error
+}
+
+type linkedAnimationPreviewRequest struct {
+	unitID      stingray.FileID
+	animationID stingray.Hash
+	stateName   string
+	preferBlend bool
+}
+
+// QueueLinkedAnimationPreview switches the Animation window to the requested
+// unit clip after that unit's state-machine links have been loaded.
+func (pv *AutoPreview) QueueLinkedAnimationPreview(unitID stingray.FileID, animationID stingray.Hash, stateName string, preferBlend bool) {
+	pv.pendingAnimation = &linkedAnimationPreviewRequest{
+		unitID: unitID, animationID: animationID, stateName: stateName, preferBlend: preferBlend,
+	}
+}
+
+func (pv *AutoPreview) SetAnimationResources(ids []stingray.FileID) {
+	pv.animationResources = append(pv.animationResources[:0], ids...)
+	if pv.previews.unit != nil {
+		pv.previews.unit.SetAnimationResources(ids)
+	}
+	if pv.animationUnit != nil {
+		pv.animationUnit.SetAnimationResources(ids)
+	}
 }
 
 type ExtractorPlanetParameters struct {
@@ -79,13 +120,16 @@ type ExtractorArmorParameters struct {
 	SelectedArchives func() []stingray.Hash
 }
 
-func NewAutoPreview(otoCtx *oto.Context, audioSampleRate int, hashes map[stingray.Hash]string, thinhashes map[stingray.ThinHash]string, getResourceGenerator GetResourceGeneratorFunc, getOverride func(stingray.FileID) stingray.FileID, runner *exec.Runner, planetParams ExtractorPlanetParameters, armorParams ExtractorArmorParameters) (*AutoPreview, error) {
+func NewAutoPreview(otoCtx *oto.Context, audioSampleRate int, hashes map[stingray.Hash]string, thinhashes map[stingray.ThinHash]string, isHelldivers1 bool, getResourceGenerator GetResourceGeneratorFunc, getOverride func(stingray.FileID) stingray.FileID, runner *exec.Runner, planetParams ExtractorPlanetParameters, armorParams ExtractorArmorParameters, resolveHD1Material ResolveHD1MaterialFunc) (*AutoPreview, error) {
 	var err error
 	pv := &AutoPreview{
 		hashes:               hashes,
 		thinhashes:           thinhashes,
+		isHelldivers1:        isHelldivers1,
 		getResourceGenerator: getResourceGenerator,
 		getOverride:          getOverride,
+		resolveHD1Material:   resolveHD1Material,
+		armorParams:          armorParams,
 	}
 	lookupHash := func(h stingray.Hash) string {
 		if val, contains := hashes[h]; contains {
@@ -100,10 +144,13 @@ func NewAutoPreview(otoCtx *oto.Context, audioSampleRate int, hashes map[stingra
 		}
 		return h.String()
 	}
-	pv.previews.unit, err = NewUnitPreview(getResourceGenerator(true), pv.getOverride, armorParams, lookupHash, lookupThinHash)
+	pv.lookupHash = lookupHash
+	pv.lookupThinHash = lookupThinHash
+	pv.previews.unit, err = NewUnitPreview(getResourceGenerator(true), pv.getOverride, armorParams, lookupHash, lookupThinHash, isHelldivers1)
 	if err != nil {
 		return nil, err
 	}
+	pv.previews.unit.resolveHD1Material = resolveHD1Material
 	pv.previews.audio = NewWwisePreview(otoCtx, audioSampleRate)
 	pv.previews.video = NewBinkPreview(runner)
 	pv.previews.texture = NewImagePreview()
@@ -117,6 +164,9 @@ func NewAutoPreview(otoCtx *oto.Context, audioSampleRate int, hashes map[stingra
 
 func (pv *AutoPreview) Delete() {
 	pv.previews.unit.Delete()
+	if pv.animationUnit != nil {
+		pv.animationUnit.Delete()
+	}
 	pv.previews.audio.Delete()
 	pv.previews.video.Delete()
 	pv.previews.texture.Delete()
@@ -140,6 +190,84 @@ func (pv *AutoPreview) NeedCJKFont() bool {
 	return pv.previews.strings.NeedCJKFont()
 }
 
+func (pv *AutoPreview) NewUnitGallery() (*UnitGallery, error) {
+	return pv.newSceneGallery()
+}
+
+func (pv *AutoPreview) NewLevelGallery() (*UnitGallery, error) {
+	gallery, err := pv.newSceneGallery()
+	if err != nil {
+		return nil, err
+	}
+	gallery.itemType = stingray.Sum("level")
+	gallery.collectionName = "levels"
+	gallery.levelPreviewAngle = DefaultUnitCamera()
+	gallery.SetEntityInfo(pv.entityInfo)
+	pv.levelGallery = gallery
+	return gallery, nil
+}
+
+func (pv *AutoPreview) newSceneGallery() (*UnitGallery, error) {
+	renderer, err := NewUnitPreview(pv.getResourceGenerator(true), pv.getOverride, pv.armorParams, pv.lookupHash, pv.lookupThinHash, pv.isHelldivers1)
+	if err != nil {
+		return nil, err
+	}
+	renderer.resolveHD1Material = pv.resolveHD1Material
+	return NewUnitGallery(renderer, pv.getResourceGenerator(true), pv.thinhashes), nil
+}
+
+func (pv *AutoPreview) NewTextureGallery() *TextureGallery {
+	return NewTextureGallery(pv.getResourceGenerator(false))
+}
+
+func (pv *AutoPreview) UnitCamera() (UnitCamera, bool) {
+	if pv.activeType != AutoPreviewUnit {
+		return UnitCamera{}, false
+	}
+	return pv.previews.unit.Camera(), true
+}
+
+func (pv *AutoPreview) SetUnitCamera(camera UnitCamera) {
+	if pv.activeType == AutoPreviewUnit {
+		pv.previews.unit.SetCamera(camera)
+	}
+}
+
+// SetHideLevelGround applies the level gallery's ground visibility preference
+// to the regular preview and any animation preview renderer.
+func (pv *AutoPreview) SetHideLevelGround(hidden bool) {
+	if pv.previews.unit != nil {
+		pv.previews.unit.SetHideLevelGround(hidden)
+	}
+	if pv.animationUnit != nil {
+		pv.animationUnit.SetHideLevelGround(hidden)
+	}
+}
+
+func (pv *AutoPreview) HideLevelGround() bool {
+	return pv.previews.unit != nil && pv.previews.unit.hideLevelGround
+}
+
+func (pv *AutoPreview) SceneOverlayVisible(kind SceneOverlayKind) bool {
+	return pv.previews.unit == nil || pv.previews.unit.SceneOverlayVisible(kind)
+}
+
+func (pv *AutoPreview) SetSceneOverlayVisible(kind SceneOverlayKind, visible bool) {
+	if pv.previews.unit != nil {
+		pv.previews.unit.SetSceneOverlayVisible(kind, visible)
+	}
+	if pv.animationUnit != nil {
+		pv.animationUnit.SetSceneOverlayVisible(kind, visible)
+	}
+}
+
+func (pv *AutoPreview) AutoZoomUnitNow() {
+	if pv.activeType == AutoPreviewUnit {
+		pv.previews.unit.doAutoZoomNextFrame = true
+		pv.previews.unit.animTime = 0
+	}
+}
+
 func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, maxVideoVerticalResolution int, colorGrading stingray.FileID, entityVarMapping shading_environment.ShadingEnvironmentEntityToShaderMapping) {
 	if fileID == (stingray.FileID{}) {
 		pv.activeID.Name.Value = 0
@@ -150,6 +278,9 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 
 	pv.activeID = fileID
 	pv.err = nil
+	if pv.pendingAnimation != nil && pv.pendingAnimation.unitID != fileID {
+		pv.pendingAnimation = nil
+	}
 
 	var data [3][]byte
 	// Fills data with the files of the according
@@ -177,6 +308,12 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 	if err == nil && exists {
 		entityInfo, err = entity.LoadEntity(bytes.NewReader(entityData), entityVarMapping)
 	}
+	gradingChanged := pv.colorGradingID != colorGrading
+	pv.colorGradingID = colorGrading
+	pv.entityInfo = entityInfo
+	if gradingChanged && pv.levelGallery != nil {
+		pv.levelGallery.SetEntityInfo(entityInfo)
+	}
 	loadStart := time.Now()
 	switch fileID.Type {
 	case stingray.Sum("unit"):
@@ -186,6 +323,7 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 			return
 		}
 		pv.previews.unit.Clear()
+		pv.previews.unit.SetEntityInfo(entityInfo)
 		if err := pv.previews.unit.LoadUnit(
 			fileID.Name,
 			data[stingray.DataMain],
@@ -195,6 +333,17 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 			pv.err = fmt.Errorf("loading unit: %w", err)
 			return
 		}
+	case stingray.Sum("animation"):
+		pv.activeType = AutoPreviewAnimation
+		if err := loadFiles(stingray.DataMain); err != nil {
+			pv.err = err
+			return
+		}
+		pv.animationData, err = animation.LoadAnimation(bytes.NewReader(data[stingray.DataMain]))
+		if err != nil {
+			pv.err = fmt.Errorf("loading animation: %w", err)
+			return
+		}
 	case stingray.Sum("prefab"):
 		pv.activeType = AutoPreviewUnit
 		if err := loadFiles(stingray.DataMain); err != nil {
@@ -202,6 +351,7 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 			return
 		}
 		pv.previews.unit.Clear()
+		pv.previews.unit.SetEntityInfo(entityInfo)
 		if err := pv.previews.unit.LoadPrefab(
 			fileID.Name,
 			data[stingray.DataMain],
@@ -217,6 +367,7 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 			return
 		}
 		pv.previews.unit.Clear()
+		pv.previews.unit.SetEntityInfo(entityInfo)
 		if err := pv.previews.unit.LoadLevel(
 			fileID.Name,
 			data[stingray.DataMain],
@@ -318,6 +469,15 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 			pv.err = err
 			return
 		}
+		if len(data[stingray.DataMain]) >= 4 && string(data[stingray.DataMain][:4]) == "DDS " {
+			img, err := dds.Decode(bytes.NewReader(data[stingray.DataMain]), false)
+			if err != nil {
+				pv.err = fmt.Errorf("loading Helldivers 1 DDS image: %w", err)
+				return
+			}
+			ImagePreviewLoadDDS(pv.previews.texture, img)
+			return
+		}
 		r := io.MultiReader(
 			bytes.NewReader(data[stingray.DataMain]),
 			bytes.NewReader(data[stingray.DataStream]),
@@ -353,13 +513,21 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 			pv.err = err
 			return
 		}
-		data, err := material.LoadMain(bytes.NewReader(data[stingray.DataMain]))
+		var materialData *material.Material
+		var err error
+		if pv.isHelldivers1 {
+			materialData, err = material.LoadHelldivers1Main(data[stingray.DataMain], stingray.ThinHash{}, nil, func(textureName stingray.Hash) bool {
+				textureBytes, exists, textureErr := pv.getResourceGenerator(false)(stingray.NewFileID(textureName, stingray.Sum("texture")), stingray.DataMain)
+				return textureErr == nil && exists && len(textureBytes) >= 4 && string(textureBytes[:4]) == "DDS "
+			})
+		} else {
+			materialData, err = material.LoadMain(bytes.NewReader(data[stingray.DataMain]))
+		}
 		if err != nil {
 			pv.err = fmt.Errorf("loading material: %w", err)
 			return
 		}
-
-		err = pv.previews.material.LoadMaterial(data, pv.getResourceGenerator(false), pv.hashes, pv.thinhashes)
+		err = pv.previews.material.LoadMaterial(materialData, pv.getResourceGenerator(false), pv.hashes, pv.thinhashes)
 		if err != nil {
 			pv.err = fmt.Errorf("loading material: %w", err)
 			return
@@ -395,7 +563,23 @@ func (pv *AutoPreview) LoadFile(ctx context.Context, fileID stingray.FileID, max
 	pv.loadMs = uint32(time.Since(loadStart).Milliseconds())
 }
 
+var ArmorSetTypeHash = stingray.Sum("armor_set")
+
+func (pv *AutoPreview) ShowArmorSet(kitID uint32, kitArchive stingray.Hash) bool {
+	if pv.previews.unit == nil || !pv.previews.unit.LoadArmorSetByKit(kitID) {
+		return false
+	}
+	pv.err = nil
+	pv.activeType = AutoPreviewUnit
+	pv.activeID = stingray.NewFileID(kitArchive, ArmorSetTypeHash)
+	return true
+}
+
 func (pv *AutoPreview) UpdateAssetOverrides(entityInfo *entity.Entity) {
+	pv.entityInfo = entityInfo
+	if pv.levelGallery != nil {
+		pv.levelGallery.SetEntityInfo(entityInfo)
+	}
 	if pv.activeType != AutoPreviewUnit {
 		return
 	}
@@ -434,6 +618,8 @@ func (pv *AutoPreview) Draw(name string) bool {
 		return false
 	case AutoPreviewUnit:
 		pv.previews.unit.Draw(name)
+	case AutoPreviewAnimation:
+		pv.previews.unit.DrawAnimationInfo(pv.activeID.Name, pv.animationData)
 	case AutoPreviewAudio:
 		pv.previews.audio.Draw(name)
 	case AutoPreviewVideo:
@@ -476,6 +662,139 @@ func (pv *AutoPreview) DrawSettings() bool {
 		pv.previews.material.DrawSettings()
 	case AutoPreviewUnit:
 		pv.previews.unit.DrawSettings()
+	case AutoPreviewAnimation:
+		return false
+	}
+	return true
+}
+
+func (pv *AutoPreview) DrawAnimation(name string) bool {
+	if pv.err != nil {
+		imutils.TextError(pv.err)
+		return true
+	}
+	if pv.activeID == (stingray.FileID{}) {
+		imgui.TextUnformatted("Select a unit or animation resource to play it here.")
+		return true
+	}
+	if pv.animationUnit == nil {
+		renderer, err := NewUnitPreview(pv.getResourceGenerator(true), pv.getOverride, pv.armorParams, pv.lookupHash, pv.lookupThinHash, pv.isHelldivers1)
+		if err != nil {
+			imutils.TextError(err)
+			return true
+		}
+		renderer.resolveHD1Material = pv.resolveHD1Material
+		renderer.SetAnimationEnabled(true)
+		renderer.SetAnimationResources(pv.animationResources)
+		renderer.SetEntityInfo(pv.entityInfo)
+		pv.animationUnit = renderer
+	}
+
+	switch pv.activeID.Type {
+	case ArmorSetTypeHash:
+		if pv.animationUnitSource != pv.activeID {
+			var kitID uint32
+			kit, ok := pv.armorParams.ArmorSets[pv.activeID.Name]
+			if !ok {
+				imutils.TextError(fmt.Errorf("armor set is unavailable"))
+				return true
+			}
+			kitID = kit.Id.Value
+			renderer := pv.animationUnit
+			renderer.armorAnimationMode = true
+			if !renderer.LoadArmorSetByKit(kitID) {
+				imutils.TextError(fmt.Errorf("could not assemble armor set"))
+				return true
+			}
+			rigID := stingray.NewFileID(stingray.Sum("content/fac_helldivers/cha_avatar/avatar_helldiver"), stingray.Sum("unit"))
+			data, exists, err := pv.getResourceGenerator(true)(rigID, stingray.DataMain)
+			if err != nil || !exists {
+				imutils.TextError(fmt.Errorf("Helldiver animation rig is unavailable"))
+				return true
+			}
+			rig, err := unit.LoadInfo(bytes.NewReader(data))
+			if err != nil {
+				imutils.TextError(fmt.Errorf("loading Helldiver animation rig: %w", err))
+				return true
+			}
+			root := renderer.rootHash
+			renderer.rootHash = rigID
+			renderer.loadLinkedAnimations(rig)
+			renderer.rootHash = root
+			renderer.armorBoneMap = make(map[stingray.FileID][]int)
+			byName := make(map[stingray.ThinHash]int, len(rig.Bones))
+			for i, b := range rig.Bones {
+				byName[b.NameHash] = i
+			}
+			for id, info := range renderer.unitInfos {
+				mapping := make([]int, len(info.Bones))
+				for i, b := range info.Bones {
+					mapping[i] = -1
+					if j, ok := byName[b.NameHash]; ok {
+						mapping[i] = j
+					}
+				}
+				renderer.armorBoneMap[id] = mapping
+			}
+			pv.animationUnitSource = pv.activeID
+		}
+		pv.animationUnit.DrawAnimated(name)
+	case stingray.Sum("unit"):
+		pv.animationUnit.armorAnimationMode = false
+		if pv.animationUnitSource != pv.activeID {
+			mainData, exists, err := pv.getResourceGenerator(true)(pv.activeID, stingray.DataMain)
+			if err != nil || !exists {
+				if err == nil {
+					err = fmt.Errorf("unit resource is missing")
+				}
+				imutils.TextError(fmt.Errorf("loading unit animation preview: %w", err))
+				return true
+			}
+			gpuData, _, err := pv.getResourceGenerator(true)(pv.activeID, stingray.DataGPU)
+			if err != nil {
+				imutils.TextError(fmt.Errorf("loading unit animation mesh: %w", err))
+				return true
+			}
+			pv.animationUnit.Clear()
+			pv.animationUnit.SetEntityInfo(pv.entityInfo)
+			if err := pv.animationUnit.LoadUnit(pv.activeID.Name, mainData, gpuData); err != nil {
+				imutils.TextError(fmt.Errorf("loading unit animation preview: %w", err))
+				return true
+			}
+			pv.animationUnitSource = pv.activeID
+		}
+		if request := pv.pendingAnimation; request != nil && request.unitID == pv.activeID {
+			if err := pv.animationUnit.SelectLinkedAnimation(request.animationID, request.stateName, request.preferBlend); err != nil {
+				pv.animationUnit.animationPlayer.loadError = err
+			}
+			pv.pendingAnimation = nil
+		}
+		pv.animationUnit.DrawAnimated(name)
+	case stingray.Sum("animation"):
+		if pv.animationUnitSource != pv.activeID && pv.animationData != nil {
+			pv.animationUnit.Clear()
+			animationData, exists, err := pv.getResourceGenerator(false)(pv.activeID, stingray.DataMain)
+			if err != nil || !exists {
+				if err == nil {
+					err = fmt.Errorf("animation resource is missing")
+				}
+				imutils.TextError(fmt.Errorf("reading animation: %w", err))
+				return true
+			}
+			if err := pv.animationUnit.SetStandaloneAnimation(pv.activeID.Name, animationData); err != nil {
+				imutils.TextError(fmt.Errorf("loading animation: %w", err))
+				return true
+			}
+			pv.animationUnit.animationPlayer.playing = true
+			pv.animationUnitSource = pv.activeID
+		}
+		if pv.animationUnit.HasLoadedUnit() {
+			pv.animationUnit.DrawAnimated(name)
+		} else {
+			pv.animationUnit.DrawStandaloneAnimation()
+		}
+	default:
+		imgui.TextUnformatted("Select a unit or animation resource to play it here.")
 	}
 	return true
 }

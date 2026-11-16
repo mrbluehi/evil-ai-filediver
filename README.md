@@ -1,19 +1,47 @@
-<div align="center">
+# Evil AI Filediver
 
-# Filediver
-<img src="appicons/filedivericon-256.png" height=80>
+**An unofficial, community-maintained, AI-generated and AI-assisted fork of [Filediver](https://github.com/xypwn/filediver).** This fork adds Helldivers-focused research, browsing, comparison, animation, and preview features to the original Filediver source. The custom additions were developed with substantial AI assistance and are maintained for the `mrbluehi/evil-ai-filediver` fork.
 
-[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/xypwn/filediver/.github%2Fworkflows%2Fbuild-release.yml)](https://github.com/xypwn/filediver/actions)
-[![GitHub License](https://img.shields.io/github/license/xypwn/filediver)](https://opensource.org/license/bsd-3-clause)
+This project is not affiliated with Arrowhead Game Studios, Sony Interactive Entertainment, or the original Filediver maintainers. The upstream project and its contributors retain their original credit and license; see the upstream [Filediver repository](https://github.com/xypwn/filediver) and the license included here. The source repository does not bundle Helldivers game archives.
 
-[![GitHub Release](https://img.shields.io/github/v/release/xypwn/filediver)](https://github.com/xypwn/filediver/releases/latest/)
-[![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/xypwn/filediver/total)](https://github.com/xypwn/filediver/releases/latest/)
+## Custom feature demonstrations
 
-An unofficial Helldivers 2 game asset extractor.
-</div>
+### Texture browser
+
+![Texture browser grid with texture previews, sharp display, grid sizing, and resolution sorting](docs/media/texture-browser.png)
+
+### String search
+
+![Localized string search showing filtered enemy-name matches and highlighted search text](docs/media/string-search.png)
+
+### Unit browser
+
+![Unit grid showing preview-angle capture, animation filtering, and file-size sorting](docs/media/unit-browser.png)
+
+### Animation preview
+
+Factory Strider and Bile Titan animation playback in the custom animation viewer:
+
+![Factory Strider animation preview](docs/media/factory-strider-animation.gif)
+
+![Bile Titan animation preview](docs/media/bile-titan-animation.gif)
+
+See [CUSTOM_FEATURES.txt](CUSTOM_FEATURES.txt) for a detailed inventory of the additions in this fork that are not part of upstream Filediver.
+
+> The download links below refer to upstream Filediver releases. They are provided for the original app and helper scripts; they are not builds of this custom fork. Build this fork from source using the instructions below, or use a fork-specific release if one is published later.
+
+## Build this fork
+
+From the repository root, build/run the custom GUI with:
+
+```sh
+go run ./cmd/filediver-gui
+```
+
+The GUI uses native graphics/audio bindings and therefore needs the platform build prerequisites used by upstream Filediver (including CGO and a C compiler on Windows). The CI workflow and upstream hacking notes below describe the repository build setup.
 
 ## Download
-### Filediver GUI (graphical interface with preview)
+### Filediver (upstream project) GUI (graphical interface with preview)
 ![GUI Screenshot](screenshots/gui.png)
 - [Download GUI Windows (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/filediver-gui-windows.exe)
 - [Download GUI Linux (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/filediver-gui-linux)
@@ -38,7 +66,7 @@ An unofficial Helldivers 2 game asset extractor.
 	- Create a new text file called `filediver-scripts_version` (NO EXTENSION). Edit the file with notepad, type in the latest version of filediver (e.g. `v0.6.15`) and hit save.
 </details>
 
-### Filediver CLI (command-line interface)
+### Filediver (upstream project) CLI (command-line interface)
 - [Download CLI Windows (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/filediver-cli-windows.zip)
 - [Download CLI Linux (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/filediver-cli-linux.zip)
 

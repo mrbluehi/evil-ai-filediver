@@ -14,6 +14,10 @@ type Preferences struct {
 	AutoCheckForUpdates            bool
 	PreviewVideoVerticalResolution int
 	AllowVideoMP4Export            bool
+	HideLevelGround                bool
+	UnitPreviewAngle               [2]float32
+	UnitPreviewAngleSet            bool
+	UnitComparePath                string
 }
 
 type _assert_comparable[T comparable] = struct{}

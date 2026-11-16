@@ -30,6 +30,7 @@ require (
 	github.com/walles/moor/v2 v2.16.2
 	github.com/x448/float16 v0.8.4
 	golang.design/x/clipboard v0.7.1
+	golang.org/x/crypto v0.46.0
 	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa
 	golang.org/x/image v0.40.0
 	golang.org/x/sys v0.47.0

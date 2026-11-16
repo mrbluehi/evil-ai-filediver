@@ -18,18 +18,23 @@ type FileMetadata struct {
 	// as having an assigned value.
 	AvailableFields map[string]bool `meta:"true"`
 
-	Name          stingray.Hash       `help:"File name" example:"\"content/fac_helldivers/...\""`
-	Type          stingray.Hash       `help:"File type" example:"\"unit\""`
-	Archives      []stingray.Hash     `help:"Archives the file is contained in"`
-	MaterialSlots []stingray.ThinHash `help:"Material slots in this model"`
-	MeshMaterials []stingray.Hash     `help:"Materials assigned to meshes in this model"`
-	Width         int                 `help:"Texture width"`
-	Height        int                 `help:"Texture height"`
-	Format        string              `help:"Texture format" example:"\"BC1UNorm\""`
-	Language      stingray.ThinHash   `help:"Strings language" example:"\"us\""`
-	BaseMaterial  stingray.Hash       `help:"Materials' parent"`
-	TextureSlots  []stingray.ThinHash `help:"Material texture slot names"`
-	TextureNames  []stingray.Hash     `help:"Material texture names"`
+	Name            stingray.Hash       `help:"File name" example:"\"content/fac_helldivers/...\""`
+	Type            stingray.Hash       `help:"File type" example:"\"unit\""`
+	Archives        []stingray.Hash     `help:"Archives the file is contained in"`
+	MaterialSlots   []stingray.ThinHash `help:"Material slots in this model"`
+	MeshMaterials   []stingray.Hash     `help:"Materials assigned to meshes in this model"`
+	VertexCount     uint64              `help:"Vertex count across this unit's highest-quality LOD mesh parts"`
+	TriangleCount   uint64              `help:"Triangle count across this unit's highest-quality LOD mesh parts"`
+	AllLODTriangles uint64              `help:"Triangle count across all LOD mesh parts in this unit"`
+	ModelSize       uint64              `help:"Size in bytes of this unit's resources, including its referenced geometry group when present"`
+	ModelExtent     float64             `help:"Largest axis-aligned extent of the highest-quality visible mesh parts, in model units"`
+	Width           int                 `help:"Texture width"`
+	Height          int                 `help:"Texture height"`
+	Format          string              `help:"Texture format" example:"\"BC1UNorm\""`
+	Language        stingray.ThinHash   `help:"Strings language" example:"\"us\""`
+	BaseMaterial    stingray.Hash       `help:"Materials' parent"`
+	TextureSlots    []stingray.ThinHash `help:"Material texture slot names"`
+	TextureNames    []stingray.Hash     `help:"Material texture names"`
 }
 
 // String representation for metadata types
@@ -47,7 +52,7 @@ func FileMetadataTypeName(fieldName string) string {
 			return "thin hash"
 		case reflect.TypeFor[string]():
 			return "string"
-		case reflect.TypeFor[int](), reflect.TypeFor[float64]():
+		case reflect.TypeFor[int](), reflect.TypeFor[uint64](), reflect.TypeFor[float64]():
 			return "number"
 		default:
 			panic("unknown type " + t.String())

@@ -3,7 +3,6 @@ package strings
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"maps"
@@ -102,9 +101,17 @@ func Load(r io.Reader) (*Strings, error) {
 
 	res, err := LoadHeader(dataR)
 	if err != nil {
-		fmt.Println("a\n", hex.EncodeToString(data), len(data))
 		return nil, err
 	}
+	// Validate the table before allocating from its untrusted Count field. A
+	// malformed resource should be skipped by callers rather than panicking or
+	// attempting an enormous allocation.
+	headerSize := uint64(len(data) - dataR.Len())
+	arraysSize := uint64(res.Count) * 8
+	if arraysSize > uint64(dataR.Len()) {
+		return nil, fmt.Errorf("string table count %d exceeds remaining data", res.Count)
+	}
+	stringsDataOffset := headerSize + arraysSize
 
 	stringIDs := make([]uint32, res.Count)
 	stringOffsets := make([]uint32, res.Count)
@@ -119,6 +126,9 @@ func Load(r io.Reader) (*Strings, error) {
 	}
 
 	for i, offset := range stringOffsets {
+		if uint64(offset) < stringsDataOffset || uint64(offset) >= uint64(len(data)) {
+			return nil, fmt.Errorf("string offset %d is outside string data", offset)
+		}
 		s := data[offset:]
 		end := bytes.IndexByte(s, 0)
 		if end == -1 {

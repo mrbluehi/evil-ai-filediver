@@ -33,6 +33,28 @@ func (fb *GLViewState) Delete() {
 	gl.DeleteRenderbuffers(1, &fb.rbo)
 }
 
+func (fb *GLViewState) ReadPixelsRGBA() ([]byte, error) {
+	if fb.width <= 0 || fb.height <= 0 {
+		return nil, errors.New("framebuffer has not been sized")
+	}
+	var previousFramebuffer, previousPackAlignment int32
+	var previousViewport [4]int32
+	gl.GetIntegerv(gl.FRAMEBUFFER_BINDING, &previousFramebuffer)
+	gl.GetIntegerv(gl.PACK_ALIGNMENT, &previousPackAlignment)
+	gl.GetIntegerv(gl.VIEWPORT, &previousViewport[0])
+	defer func() {
+		gl.BindFramebuffer(gl.FRAMEBUFFER, uint32(previousFramebuffer))
+		gl.PixelStorei(gl.PACK_ALIGNMENT, previousPackAlignment)
+		gl.Viewport(previousViewport[0], previousViewport[1], previousViewport[2], previousViewport[3])
+	}()
+	gl.BindFramebuffer(gl.FRAMEBUFFER, fb.fbo)
+	gl.ReadBuffer(gl.COLOR_ATTACHMENT0)
+	gl.PixelStorei(gl.PACK_ALIGNMENT, 1)
+	pixels := make([]byte, int(fb.width)*int(fb.height)*4)
+	gl.ReadPixels(0, 0, fb.width, fb.height, gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(pixels))
+	return pixels, nil
+}
+
 func (fb *GLViewState) maybeResize(newWidth, newHeight int32) error {
 	if newWidth <= 0 || newHeight <= 0 {
 		return nil

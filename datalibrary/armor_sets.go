@@ -257,9 +257,53 @@ type ArmorSet struct {
 	UnitMetadata map[stingray.Hash]UnitData
 }
 
+// PieceInfoSize is the size of HelldiverCustomizationPieceInfo in the live typelib (the Piece struct).
+const PieceInfoSize = 112
+
+// readPieces reads a body's piece array with the given struct stride. Known layouts:
+// 72 B (2024-02/03 builds: no cape_nac/base_data/tone/camo), 96 B (2024-11 .. 2026-03),
+// 112 B (live: + camouflage array). Unknown strides fall back to the 72-byte prefix.
+func readPieces(arr DLArray, r *bytes.Reader, base int64, stride int) ([]Piece, error) {
+	if stride == PieceInfoSize {
+		return ResolveDLArray[Piece](arr, r, base)
+	}
+	if arr.Offset < 0 || arr.Count == 0 {
+		return []Piece{}, nil
+	}
+	buf := make([]byte, int(arr.Count)*stride)
+	if _, err := r.Seek(base+arr.Offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	u64 := func(b []byte, o int) stingray.Hash { return stingray.Hash{Value: binary.LittleEndian.Uint64(b[o:])} }
+	u32 := func(b []byte, o int) uint32 { return binary.LittleEndian.Uint32(b[o:]) }
+	out := make([]Piece, arr.Count)
+	for i := range out {
+		b := buf[i*stride : (i+1)*stride]
+		p := Piece{Path: u64(b, 0), Slot: CustomizationKitSlot(u32(b, 8)), Type: CustomizationKitPieceType(u32(b, 12)),
+			Weight: CustomizationKitWeight(u32(b, 16)), MaterialLut: u64(b, 24), PatternLut: u64(b, 32), CapeLut: u64(b, 40), CapeGradient: u64(b, 48)}
+		p.CamouflagePieces = DLArray{Offset: -1}
+		if stride >= 96 {
+			p.CapeNac, p.DecalScalarFields, p.BaseData, p.DecalSheet, p.ToneVariations = u64(b, 56), u64(b, 64), u64(b, 72), u64(b, 80), b[88]
+		} else {
+			p.DecalScalarFields, p.DecalSheet = u64(b, 56), u64(b, 64)
+		}
+		out[i] = p
+	}
+	return out, nil
+}
+
 // Map of archive hash to armor set
 func LoadArmorSetDefinitions(strings map[uint32]string, passives map[uint32]HelldiverCustomizationPassiveBonusSettings) (map[stingray.Hash]ArmorSet, error) {
-	r := bytes.NewReader(customizationArmorSets)
+	return LoadArmorSetDefinitionsFromData(customizationArmorSets, strings, passives, PieceInfoSize)
+}
+
+// LoadArmorSetDefinitionsFromData is LoadArmorSetDefinitions on a given (plaintext) table.
+// pieceSize is that build's size of HelldiverCustomizationPieceInfo (PieceInfoSize for live).
+func LoadArmorSetDefinitionsFromData(data []byte, strings map[uint32]string, passives map[uint32]HelldiverCustomizationPassiveBonusSettings, pieceSize int) (map[stingray.Hash]ArmorSet, error) {
+	r := bytes.NewReader(data)
 
 	getNameIfContained := func(casedId, upperId uint32) string {
 		if name, contains := strings[casedId]; contains {
@@ -332,7 +376,7 @@ func LoadArmorSetDefinitions(strings map[uint32]string, passives map[uint32]Hell
 			// if err := binary.Read(r, binary.LittleEndian, pieces); err != nil {
 			// 	return nil, fmt.Errorf("reading %v pieces for body %v in item %v (address was %x): %v", body.PiecesCount, b, i, base+body.PiecesAddress, err)
 			// }
-			pieces, err := ResolveDLArray[Piece](body.Pieces, r, base)
+			pieces, err := readPieces(body.Pieces, r, base, pieceSize)
 			if err != nil {
 				return nil, fmt.Errorf("reading %v pieces for body %v in item %v (address was %x): %v", body.Pieces.Count, b, i, base+body.Pieces.Offset, err)
 			}

@@ -145,6 +145,11 @@ func (t TaskFunc) Go(ctx context.Context, params map[string]any) *TaskExecution 
 // is sent on every update. The channel is closed after the task has completed.
 func (t TaskFunc) GoCh(outCh chan<- TaskState, ctx context.Context, params map[string]any) *TaskExecution {
 	ex, run := t.executeCommon(outCh, ctx, params)
-	go run()
+	go func() {
+		if outCh != nil {
+			defer close(outCh)
+		}
+		run()
+	}()
 	return ex
 }

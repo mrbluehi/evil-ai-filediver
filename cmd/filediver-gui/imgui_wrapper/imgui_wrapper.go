@@ -85,7 +85,9 @@ import "C"
 import (
 	"fmt"
 	"image"
+	"image/png"
 	"log"
+	"os"
 	"runtime"
 	"time"
 	"unsafe"
@@ -259,6 +261,7 @@ func Main(title string, options Options) error {
 		log.Printf("GL: %v%v\n", typStr, message)
 	}, nil)
 
+	captureFrames := 0
 	lastDrawTimestamp := time.Now()
 	drawAndPresentFrame := func() {
 		C.ImGui_ImplGlfw_NewFrame()
@@ -281,6 +284,26 @@ func Main(title string, options Options) error {
 			C.glfwMakeContextCurrent(prevContext)
 		}
 
+		captureFrames++
+		if capturePath := os.Getenv("FILEDIVER_RENDER_CHECK"); capturePath != "" && captureFrames%120 == 0 {
+			var w, h C.int
+			C.glfwGetFramebufferSize(state.glfwWindow, &w, &h)
+			if w > 0 && h > 0 {
+				img := image.NewRGBA(image.Rect(0, 0, int(w), int(h)))
+				gl.ReadPixels(0, 0, int32(w), int32(h), gl.RGBA, gl.UNSIGNED_BYTE, gl.Ptr(img.Pix))
+				stride := img.Stride
+				for y := 0; y < int(h)/2; y++ {
+					a, b := img.Pix[y*stride:(y+1)*stride], img.Pix[(int(h)-1-y)*stride:(int(h)-y)*stride]
+					for x := range a {
+						a[x], b[x] = b[x], a[x]
+					}
+				}
+				if f, err := os.Create(capturePath); err == nil {
+					png.Encode(f, img)
+					f.Close()
+				}
+			}
+		}
 		C.glfwSwapBuffers(state.glfwWindow)
 
 		targetFrameTime := time.Duration(float64(time.Second) / state.FrameRate)

@@ -27,11 +27,19 @@ func FileMetadata(meta app.FileMetadata) {
 				}
 				drawHash(h)
 			}
+		case []stingray.ThinHash:
+			for i, h := range val {
+				if i != 0 {
+					imgui.SameLineV(0, 0)
+					imutils.Textf(",")
+				}
+				drawThinHash(h)
+			}
 		case stingray.Hash:
 			drawHash(val)
 		case stingray.ThinHash:
 			drawThinHash(val)
-		case string, int, float64:
+		case string, int, uint64, float64:
 			imutils.Textf("%v", val)
 		default:
 			imutils.TextError(fmt.Errorf("unknown type %T", val))

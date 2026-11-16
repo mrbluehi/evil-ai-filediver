@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // Locus represents the location
@@ -47,6 +48,12 @@ type DataDir struct {
 	// Whether the edition of the
 	// game is prod_slim.
 	IsSlimEdition bool
+	// Whether this is the legacy Helldivers 1 package directory. HD1 uses
+	// compressed exploded packages rather than the HD2 fat/slim archive tables.
+	IsHelldivers1        bool
+	hd1Packages          map[Hash]*hd1Package
+	hd1MaterialIndexOnce sync.Once
+	hd1MaterialIndex     map[ThinHash][]FileID
 	// === SLIM EDITION ONLY FIELDS === //
 	DSAA                 *DSAA
 	ArchiveDSAAIndices   map[Hash][NumDataType]int
@@ -67,6 +74,9 @@ func OpenDataDir(ctx context.Context, dirPath string, onProgress func(curr, tota
 		// package/boot archive exists -> fat edition
 		return openDataDirFat(ctx, dirPath, onProgress)
 	} else if errors.Is(err, os.ErrNotExist) {
+		if hasHD1Package(dirPath) {
+			return openDataDirHD1(ctx, dirPath, onProgress)
+		}
 		// doesn't exist -> is contained in NXA bundle -> slim edition
 		return openDataDirSlim(ctx, dirPath, onProgress)
 	} else {
@@ -95,6 +105,9 @@ func (d *DataDir) ReadAtMost(id FileID, typ DataType, nBytes int) ([]byte, error
 		nBytes = min(int(file.Files[typ].Size), nBytes)
 	}
 
+	if d.IsHelldivers1 {
+		return readNBytesHD1(d, file, typ, nBytes)
+	}
 	if d.IsSlimEdition {
 		return readNBytesSlim(d, file, typ, nBytes)
 	} else {

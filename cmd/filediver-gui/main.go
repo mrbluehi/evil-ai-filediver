@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	crand "crypto/rand"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
 	"errors"
@@ -28,6 +30,7 @@ import (
 	"github.com/mattn/go-shellwords"
 	"github.com/ncruces/zenity"
 	"github.com/skratchdot/open-golang/open"
+	filediverapp "github.com/xypwn/filediver/app"
 	"github.com/xypwn/filediver/app/appconfig"
 	"github.com/xypwn/filediver/appicons"
 	fnt "github.com/xypwn/filediver/cmd/filediver-gui/fonts"
@@ -38,6 +41,7 @@ import (
 	"github.com/xypwn/filediver/cmd/filediver-gui/widgets"
 	"github.com/xypwn/filediver/cmd/filediver-gui/widgets/previews"
 	"github.com/xypwn/filediver/config"
+	datalib "github.com/xypwn/filediver/datalibrary"
 	"github.com/xypwn/filediver/exec"
 	"github.com/xypwn/filediver/stingray"
 	"github.com/xypwn/filediver/stingray/entity"
@@ -135,21 +139,79 @@ type guiApp struct {
 	gameDataExport *GameDataExport
 	gameData       *GameData
 
-	preview *previews.AutoPreview
+	preview                    *previews.AutoPreview
+	currentPreview             *previews.AutoPreview
+	olderBuildPreview          *previews.AutoPreview
+	olderBuildDataDir          *stingray.DataDir
+	olderBuildArmorSets        map[stingray.Hash]datalib.ArmorSet
+	olderBuildArmorTableValid  bool
+	unitGallery                *previews.UnitGallery
+	levelGallery               *previews.UnitGallery
+	textureGallery             *previews.TextureGallery
+	olderTextureGallery        *previews.TextureGallery
+	unitVersionScan            UnitVersionScan
+	unitIDs                    []stingray.FileID
+	unitIDsReady               bool
+	levelIDs                   []stingray.FileID
+	levelIDsReady              bool
+	levelLabelData             *GameData
+	levelLabels                map[stingray.FileID]inferredLevelLabel
+	levelLabelsScheduled       map[stingray.FileID]struct{}
+	levelLabelResults          chan levelLabelScanResult
+	levelLabelScanRunning      bool
+	unitLevelLookupResults     chan unitLevelUsageResult
+	unitLevelLookupID          stingray.FileID
+	unitLevelLookupResult      *unitLevelUsageResult
+	unitLevelLookupLoading     bool
+	unitLevelLookupOpen        bool
+	unitLevelLookupCancel      context.CancelFunc
+	unitGalleryDockID          imgui.ID
+	unitGalleryDockConfigured  bool
+	levelGalleryDockConfigured bool
+	animationDockID            imgui.ID
+	animationDockConfigured    bool
+	stateMachineExplorerOpen   bool
+	armorSet                   armorSetWindow
+	isArmorSetOpen             bool
+	stateMachineExplorer       *stateMachineExplorerState
+	stringSearchDockConfigured bool
+	unitComparisonAdded        map[stingray.FileID]struct{}
+	unitComparisonRemoved      map[stingray.FileID]struct{}
+	unitComparisonReady        bool
+	unitComparisonGameData     *GameData
+	unitComparisonOldPath      string
+	comparisonAddedByType      map[stingray.Hash]map[stingray.FileID]struct{}
+	comparisonRemovedByType    map[stingray.Hash]map[stingray.FileID]struct{}
+	comparisonChangedByType    map[stingray.Hash]map[stingray.FileID]struct{}
+	comparisonChangedPairs     map[stingray.Hash]map[stingray.FileID]stingray.FileID
+	comparisonMatchResults     chan versionMatchResult
+	comparisonMatchRunning     bool
+	unitComparePath            string
+	textureIDs                 []stingray.FileID
+	textureIDsReady            bool
+	textureGridScale           float32
+	textureSort                int
+	textureDescending          bool
+	textureQuery               string
+	texturePixelated           bool
+	stringSearch               StringSearchState
+	texture256px               bool
 
-	gameFileSearchQuery     string
-	filesSelectedForExport  map[stingray.FileID]struct{}
-	allSelectedForExport    bool
-	hashBulkImporter        HashBulkImporter
-	gameFileTypeSearchQuery string
-	gameFileTypes           []widgets.FilterListSection[stingray.Hash]
-	selectedGameFileTypes   map[stingray.Hash]struct{}
-	archiveIDSearchQuery    string
-	archiveIDs              []widgets.FilterListSection[stingray.Hash]
-	selectedArchives        map[stingray.Hash]struct{}
-	scrollToSelectedFile    bool
-	historyStack            []stingray.FileID
-	historyStackIndex       int
+	gameFileSearchQuery      string
+	filesSelectedForExport   map[stingray.FileID]struct{}
+	allSelectedForExport     bool
+	hashBulkImporter         HashBulkImporter
+	gameFileTypeSearchQuery  string
+	gameFileTypes            []widgets.FilterListSection[stingray.Hash]
+	selectedGameFileTypes    map[stingray.Hash]struct{}
+	archiveIDSearchQuery     string
+	archiveIDs               []widgets.FilterListSection[stingray.Hash]
+	selectedArchives         map[stingray.Hash]struct{}
+	scrollToSelectedFile     bool
+	browserJumpToFileID      stingray.FileID
+	highlightedBrowserFileID stingray.FileID
+	historyStack             []stingray.FileID
+	historyStackIndex        int
 
 	shouldSetupWindowFocus bool
 
@@ -160,6 +222,7 @@ type guiApp struct {
 	checkUpdatesDownloadURL     string
 	checkUpdatesErr             error
 	checkUpdatesLock            sync.Mutex
+	unitAnimationScan           unitAnimationScanState
 
 	autoUpdateEx *tasks.TaskExecution
 
@@ -232,6 +295,8 @@ func newGUIApp(showErrorPopup func(error)) *guiApp {
 		toolsHashConverterState:    widgets.NewHashConverter(),
 		lastBrowserItemCopiedIndex: -1,
 		lastBrowserItemCopiedTime:  -math.MaxFloat64,
+		stateMachineExplorerOpen:   true,
+		isArmorSetOpen:             true,
 		iconImage:                  appicons.Icon128Img(),
 		runUnitPreviewLoadingTest:  false,
 		allUnits:                   nil,
@@ -241,11 +306,45 @@ func newGUIApp(showErrorPopup func(error)) *guiApp {
 }
 
 func (a *guiApp) Delete() {
+	if a.armorSet.gallery != nil {
+		a.armorSet.gallery.Delete()
+		a.armorSet.gallery = nil
+	}
+	a.unitAnimationScan.Lock()
+	if a.unitAnimationScan.cancel != nil {
+		a.unitAnimationScan.cancel()
+		a.unitAnimationScan.cancel = nil
+	}
+	a.unitAnimationScan.Unlock()
+	if a.unitLevelLookupCancel != nil {
+		a.unitLevelLookupCancel()
+	}
+	if a.stateMachineExplorer != nil {
+		a.stateMachineExplorer.cancelScan()
+	}
 	if a.icon != nil {
 		a.icon.Delete()
 	}
+	if a.unitGallery != nil {
+		a.unitGallery.Delete()
+	}
+	if a.levelGallery != nil {
+		a.levelGallery.Delete()
+	}
+	if a.textureGallery != nil {
+		a.textureGallery.Delete()
+	}
+	if a.olderTextureGallery != nil {
+		a.olderTextureGallery.Delete()
+	}
 	if a.preview != nil {
 		a.preview.Delete()
+	}
+	if a.currentPreview != nil && a.currentPreview != a.preview {
+		a.currentPreview.Delete()
+	}
+	if a.olderBuildPreview != nil && a.olderBuildPreview != a.preview && a.olderBuildPreview != a.currentPreview {
+		a.olderBuildPreview.Delete()
 	}
 }
 
@@ -305,12 +404,13 @@ func (a *guiApp) onInitWindow(state *imgui_wrapper.State) error {
 			scriptsDistAsset.Filename = "scripts-dist-linux.tar.xz"
 		}
 		var scriptsDistInfo github.ReleaseAssetInfo
-		if version != "" {
-			var err error
-			scriptsDistInfo, err = scriptsDistAsset.FetchInfo(version)
-			if err != nil {
-				a.showErrorPopup(err)
-			}
+		scriptsDistVersion := version
+		if scriptsDistVersion == "v0.0.0" {
+			scriptsDistVersion = ""
+		}
+		scriptsDistInfo, err = scriptsDistAsset.FetchInfo(scriptsDistVersion)
+		if err != nil {
+			a.showErrorPopup(err)
 		}
 
 		a.ffmpegExtensionWidget = widgets.NewExtension(a.ctx, a.downloadsDir, "ffmpeg", ffmpegInfo, true)
@@ -355,6 +455,7 @@ func (a *guiApp) onInitWindow(state *imgui_wrapper.State) error {
 		a.defaultPreferences = Preferences{
 			AutoCheckForUpdates:            true,
 			PreviewVideoVerticalResolution: 720,
+			UnitPreviewAngle:               [2]float32{math.Pi, 0},
 		}
 
 		a.defaultPreferences.GUIScale = state.GUIScale
@@ -364,6 +465,7 @@ func (a *guiApp) onInitWindow(state *imgui_wrapper.State) error {
 		if err := a.preferences.Load(a.preferencesPath); err != nil {
 			return fmt.Errorf("loading preferences: %w", err)
 		}
+		a.unitComparePath = a.preferences.UnitComparePath
 		state.GUIScale = a.preferences.GUIScale
 		state.FrameRate = a.preferences.TargetFPS
 	}
@@ -403,6 +505,7 @@ func (a *guiApp) onPreDraw(state *imgui_wrapper.State) error {
 			a.otoCtx, a.audioSampleRate,
 			a.gameData.Hashes,
 			a.gameData.ThinHashes,
+			a.gameData.DataDir.IsHelldivers1,
 			func(allowOverride bool) func(id stingray.FileID, typ stingray.DataType) (data []byte, exists bool, err error) {
 				return func(id stingray.FileID, typ stingray.DataType) (data []byte, exists bool, err error) {
 					override := getOverride(id)
@@ -430,10 +533,82 @@ func (a *guiApp) onPreDraw(state *imgui_wrapper.State) error {
 				ArmorSets:        a.gameData.ArmorSets,
 				SelectedArchives: func() []stingray.Hash { return slices.SortedFunc(maps.Keys(a.selectedArchives), stingray.Hash.Cmp) },
 			},
+			func(unitID stingray.FileID, materialName stingray.ThinHash) (stingray.FileID, []byte, bool, error) {
+				materialID, data, err := a.gameData.DataDir.ResolveHelldivers1Material(unitID, materialName)
+				if err == stingray.ErrFileNotExist {
+					return stingray.FileID{}, nil, false, nil
+				}
+				return materialID, data, err == nil, err
+			},
 		)
 		if err != nil {
 			return fmt.Errorf("creating preview: %w", err)
 		}
+		animationResources := make([]stingray.FileID, 0)
+		for id := range a.gameData.DataDir.Files {
+			if id.Type == stingray.Sum("animation") {
+				animationResources = append(animationResources, id)
+			}
+		}
+		slices.SortFunc(animationResources, stingray.FileID.Cmp)
+		a.preview.SetAnimationResources(animationResources)
+	}
+	if a.preview != nil && a.unitGallery == nil {
+		var err error
+		a.unitGallery, err = a.preview.NewUnitGallery()
+		if err != nil {
+			return fmt.Errorf("creating unit gallery: %w", err)
+		}
+		cacheSource := filepath.Clean(a.gameData.DataDir.Path)
+		if build := a.gameData.GameBuildInfo; build != nil {
+			cacheSource += "\n" + build.Combined + "\n" + build.Commit + "\n" + build.Hash
+		}
+		cacheIdentity := sha256.Sum256([]byte(cacheSource))
+		cacheDir := filepath.Join(xdg.CacheHome, "filediver", "unit-thumbnails-v1", hex.EncodeToString(cacheIdentity[:]))
+		migratedAngle, err := a.unitGallery.ConfigureUnitGrid(cacheDir, a.preferences.UnitPreviewAngle, a.preferences.UnitPreviewAngleSet)
+		if err != nil {
+			a.unitGallery.Delete()
+			a.unitGallery = nil
+			return err
+		}
+		if migratedAngle {
+			a.preferences.UnitPreviewAngle = a.unitGallery.UnitPreviewAngle()
+			a.preferences.UnitPreviewAngleSet = true
+			if err := a.preferences.Save(a.preferencesPath); err != nil {
+				a.unitGallery.Delete()
+				a.unitGallery = nil
+				return fmt.Errorf("saving migrated Units preview angle: %w", err)
+			}
+		}
+		if a.preferences.UnitPreviewAngleSet || migratedAngle {
+			// The global preference is now the source of truth. Remove any old
+			// per-build copy so Reset Preferences cannot resurrect a stale angle.
+			_ = os.Remove(filepath.Join(cacheDir, "unit-preview-angle.json"))
+		}
+	}
+	if a.preview != nil && a.levelGallery == nil {
+		var err error
+		a.levelGallery, err = a.preview.NewLevelGallery()
+		if err != nil {
+			return fmt.Errorf("creating level gallery: %w", err)
+		}
+		cacheSource := filepath.Clean(a.gameData.DataDir.Path)
+		if build := a.gameData.GameBuildInfo; build != nil {
+			cacheSource += "\n" + build.Combined + "\n" + build.Commit + "\n" + build.Hash
+		}
+		cacheIdentity := sha256.Sum256([]byte(cacheSource))
+		cacheDir := filepath.Join(xdg.CacheHome, "filediver", "level-thumbnails", hex.EncodeToString(cacheIdentity[:]))
+		if err := a.levelGallery.ConfigureLevelGrid(cacheDir); err != nil {
+			a.levelGallery.Delete()
+			a.levelGallery = nil
+			return err
+		}
+	}
+	if a.preview != nil && a.textureGallery == nil {
+		a.textureGallery = a.preview.NewTextureGallery()
+	}
+	if a.currentPreview == nil && a.preview != nil {
+		a.currentPreview = a.preview
 	}
 	return nil
 }
@@ -465,7 +640,14 @@ func (a *guiApp) onDraw(state *imgui_wrapper.State) {
 			imgui.InternalDockBuilderDockWindow(fnt.I.FileExport+" Export", bottomLeftID)
 			imgui.InternalDockBuilderDockWindow(fnt.I.SettingsApplications+" Extractor config", bottomLeftID)
 			imgui.InternalDockBuilderDockWindow(fnt.I.Preview+" Preview", topRightID)
+			imgui.InternalDockBuilderDockWindow("Animation", topRightID)
+			imgui.InternalDockBuilderDockWindow("State Machines", topRightID)
 			imgui.InternalDockBuilderDockWindow(fnt.I.Tag+" Metadata", topRightID)
+			imgui.InternalDockBuilderDockWindow(fnt.I.ViewList+" Units", topRightID)
+			imgui.InternalDockBuilderDockWindow("Levels", topRightID)
+			imgui.InternalDockBuilderDockWindow("Compare", topRightID)
+			imgui.InternalDockBuilderDockWindow(fnt.I.Image+" Textures", topRightID)
+			imgui.InternalDockBuilderDockWindow("String Search", topRightID)
 			imgui.InternalDockBuilderDockWindow(fnt.I.DisplaySettings+" Material Settings", bottomRightID)
 			imgui.InternalDockBuilderDockWindow(fnt.I.FolderEye+" Visibility Mask Selection", sideBarID)
 			imgui.InternalDockBuilderDockWindow(fnt.I.Settings+" Tree View", sideBarID)
@@ -493,7 +675,16 @@ func (a *guiApp) onDraw(state *imgui_wrapper.State) {
 	a.drawExtractorConfigWindow()
 	a.drawLogWindow()
 	a.drawPreviewWindow(state)
+	a.drawAnimationWindow()
+	a.drawStateMachineExplorerWindow()
+	a.drawArmorSetWindow()
 	a.drawMetadataWindow()
+	a.drawUnitGalleryWindow()
+	a.drawLevelGalleryWindow()
+	a.drawUnitLevelUsageWindow()
+	a.drawUnitVersionCompareWindow()
+	a.drawTextureGalleryWindow()
+	a.drawStringSearchWindow()
 	a.drawSettingsWindow()
 
 	if a.shouldSetupWindowFocus {
@@ -650,6 +841,8 @@ func (a *guiApp) drawMenuBar() {
 		}
 		if imgui.BeginMenu("Tools") {
 			imgui.MenuItemBoolPtrV(fnt.I.TableConvert+" Hash Converter", "", &a.isToolsHashConverterOpen, true)
+			imgui.MenuItemBoolPtrV("State Machine Explorer", "", &a.stateMachineExplorerOpen, true)
+			imgui.MenuItemBoolPtrV("Armor Set", "", &a.isArmorSetOpen, true)
 			if imgui.MenuItemBool(fnt.I.LabResearch + " Run Unit Preview Test") {
 				a.allUnits = slices.Collect(func(yield func(stingray.Hash) bool) {
 					for file := range a.gameData.DataDir.Files {
@@ -819,7 +1012,6 @@ func (a *guiApp) drawBrowserWindow() {
 				DrawMetadataSearchHelp()
 				imgui.EndPopup()
 			}
-
 			if a.gameData.FilterExprErr != nil {
 				itm := searchInputTextData
 				bottomLeft := imgui.NewVec2(itm.Rect().Min.X, itm.Rect().Max.Y)
@@ -840,6 +1032,21 @@ func (a *guiApp) drawBrowserWindow() {
 			}
 			if jumpToFile, ok := widgets.PopGamefileLinkFile(); ok {
 				newActiveFileID = jumpToFile
+				a.scrollToSelectedFile = true
+			}
+			if a.browserJumpToFileID != (stingray.FileID{}) {
+				// A saved browser query or type/archive filter can hide the target.
+				// Clear those filters only when needed so the jump always lands on
+				// a visible row, while ordinary audio jumps preserve the current view.
+				if !slices.Contains(a.gameData.SortedSearchResultFileIDs, a.browserJumpToFileID) {
+					a.gameFileSearchQuery = ""
+					clear(a.selectedGameFileTypes)
+					clear(a.selectedArchives)
+					a.gameData.UpdateSearchQuery("", nil, nil)
+				}
+				newActiveFileID = a.browserJumpToFileID
+				a.highlightedBrowserFileID = a.browserJumpToFileID
+				a.browserJumpToFileID = stingray.FileID{}
 				a.scrollToSelectedFile = true
 			}
 
@@ -932,12 +1139,21 @@ func (a *guiApp) drawBrowserWindow() {
 						}
 
 						imgui.TableNextColumn()
+						highlighted := id == a.highlightedBrowserFileID
+						if highlighted {
+							imgui.PushStyleColorVec4(imgui.ColHeader, imgui.NewVec4(0.72, 0.56, 0.08, 0.92))
+							imgui.PushStyleColorVec4(imgui.ColHeaderHovered, imgui.NewVec4(0.88, 0.69, 0.10, 0.96))
+							imgui.PushStyleColorVec4(imgui.ColHeaderActive, imgui.NewVec4(1.0, 0.78, 0.12, 1.0))
+						}
 						selected := imgui.SelectableBoolV(
-							a.gameData.LookupHash(id.Name),
+							a.gameData.DisplayFileName(id),
 							id == newActiveFileID,
 							imgui.SelectableFlagsSpanAllColumns|imgui.SelectableFlags(imgui.SelectableFlagsSelectOnNav),
 							imgui.NewVec2(0, 0),
 						) || (a.scrollToSelectedFile && id == newActiveFileID)
+						if highlighted {
+							imgui.PopStyleColorV(3)
+						}
 						copied := false
 						if id == newActiveFileID && imgui.Shortcut(imgui.KeyChord(imgui.ModCtrl|imgui.KeyC)) {
 							copied = true
@@ -959,7 +1175,9 @@ func (a *guiApp) drawBrowserWindow() {
 								imgui.Time()-a.lastBrowserItemCopiedTime < 1 {
 								fmt.Fprintf(&text, "%v Copied '%v'\n", fnt.I.Check, id.Name.String())
 							} else {
-								if name, ok := a.gameData.Hashes[id.Name]; ok {
+								if inferred, ok := a.gameData.InferredUnitNames[id.Name]; id.Type == stingray.Sum("unit") && ok {
+									fmt.Fprintf(&text, "Name: %v (inferred from %v), hash=%v\n", inferred.Display, inferred.Source, id.Name)
+								} else if name, ok := a.gameData.Hashes[id.Name]; ok {
 									fmt.Fprintf(&text, "Name: %v, hash=%v\n", name, id.Name)
 								} else {
 									fmt.Fprintf(&text, "Name: hash=%v\n", id.Name)
@@ -978,6 +1196,9 @@ func (a *guiApp) drawBrowserWindow() {
 						imgui.PopID()
 
 						if selected {
+							if id != a.highlightedBrowserFileID && imgui.IsItemClickedV(imgui.MouseButtonLeft) {
+								a.highlightedBrowserFileID = stingray.FileID{}
+							}
 							newActiveFileID = id
 							if a.scrollToSelectedFile {
 								imgui.SetScrollHereY()
@@ -997,6 +1218,7 @@ func (a *guiApp) drawBrowserWindow() {
 				if !noPushToHistory {
 					a.historyPush(a.preview.ActiveID(), newActiveFileID)
 				}
+				a.activateCurrentPreview()
 				a.preview.LoadFile(a.ctx, newActiveFileID, a.preferences.PreviewVideoVerticalResolution, a.gameData.ColorGrading, a.gameData.EntityVarMapping)
 			}
 			if a.preview != nil && a.gameData.AssetOverridesDirty {
@@ -1233,6 +1455,8 @@ func (a *guiApp) drawExtractorConfigWindow() {
 		if widgets.ConfigEditor(&a.extractorConfig, &a.extractorConfigShowAdvanced, &a.extractorConfigSearchQuery) {
 			if a.extractorConfig.Gamedir != prevExtrCfg.Gamedir {
 				a.gameData = nil
+				a.levelIDs = nil
+				a.levelIDsReady = false
 				a.gameDataLoad.GoLoadGameData(a.ctx, a.extractorConfig.Gamedir)
 			}
 			if a.extractorConfig.Planet.Name != prevExtrCfg.Planet.Name || a.extractorConfig.Planet.City != prevExtrCfg.Planet.City {
@@ -1279,7 +1503,15 @@ func (a *guiApp) drawLogWindow() {
 }
 
 func (a *guiApp) drawPreviewWindow(state *imgui_wrapper.State) {
-	if imgui.Begin(fnt.I.Preview + " Preview") {
+	previewVisible := imgui.Begin(fnt.I.Preview + " Preview")
+	if dockID := imgui.WindowDockID(); dockID != 0 {
+		a.unitGalleryDockID = dockID
+		a.animationDockID = dockID
+	}
+	if a.preview != nil {
+		a.preview.SetHideLevelGround(a.preferences.HideLevelGround)
+	}
+	if previewVisible {
 		if a.preview != nil {
 			defer func() {
 				if a.runUnitPreviewLoadingTest {
@@ -1331,6 +1563,22 @@ func (a *guiApp) drawPreviewWindow(state *imgui_wrapper.State) {
 	imgui.End()
 }
 
+func (a *guiApp) drawAnimationWindow() {
+	if !a.animationDockConfigured && a.animationDockID != 0 {
+		imgui.SetNextWindowDockIDV(a.animationDockID, imgui.CondFirstUseEver)
+		a.animationDockConfigured = true
+	}
+	visible := imgui.Begin("Animation")
+	if visible {
+		if a.preview == nil {
+			imgui.TextUnformatted("Loading game data...")
+		} else {
+			a.preview.DrawAnimation("Animation")
+		}
+	}
+	imgui.End()
+}
+
 func (a *guiApp) drawMetadataWindow() {
 	if imgui.Begin(fnt.I.Tag + " Metadata") {
 		if a.gameData != nil && a.preview != nil && a.preview.ActiveID() != (stingray.FileID{}) {
@@ -1344,11 +1592,859 @@ func (a *guiApp) drawMetadataWindow() {
 	imgui.End()
 }
 
+func (a *guiApp) drawUnitGalleryWindow() {
+	windowName := fnt.I.ViewList + " Units"
+	if !a.unitGalleryDockConfigured && a.unitGalleryDockID != 0 {
+		imgui.SetNextWindowDockIDV(a.unitGalleryDockID, imgui.CondFirstUseEver)
+		a.unitGalleryDockConfigured = true
+	}
+	windowVisible := imgui.Begin(windowName)
+	var selectedID stingray.FileID
+	var didSelect bool
+	if windowVisible {
+		switch {
+		case a.gameData == nil:
+			imgui.TextUnformatted("Loading game data...")
+		case a.unitGallery == nil:
+			imgui.TextUnformatted("Preparing the unit renderer...")
+		default:
+			a.unitGallery.SetUnitLevelLookupCallback(a.requestUnitLevelLookup)
+			if !a.unitIDsReady {
+				a.unitIDs = make([]stingray.FileID, 0)
+				for id := range a.gameData.DataDir.Files {
+					if id.Type == stingray.Sum("unit") {
+						a.unitIDs = append(a.unitIDs, id)
+					}
+				}
+				slices.SortFunc(a.unitIDs, func(left, right stingray.FileID) int {
+					return strings.Compare(a.gameData.KnownFileNames[left], a.gameData.KnownFileNames[right])
+				})
+				a.unitIDsReady = true
+			}
+			if camera, ok := a.preview.UnitCamera(); ok {
+				a.unitGallery.RememberCamera(a.preview.ActiveID(), camera)
+			}
+			a.refreshUnitComparison()
+			galleryIDs := a.unitIDs
+			a.unitGallery.SetVersionChanges(a.unitComparisonAdded, a.comparisonChangedByType[stingray.Sum("unit")], a.unitComparisonRemoved)
+			if a.unitGallery.HasAnimationsFilterEnabled() {
+				a.startUnitAnimationScan(galleryIDs)
+			}
+			animatedUnits, animationScanDone, animationScanProgress, animationScanTotal := a.unitAnimationScanSnapshot()
+			a.unitGallery.SetAnimationScanResults(animatedUnits, animationScanDone, animationScanProgress, animationScanTotal)
+			unitAngleTooltip := "Use the current Preview camera angle and recapture existing unit thumbnails"
+			if imgui.Button("Set preview angle") {
+				camera, ok := a.preview.UnitCamera()
+				if !ok {
+					camera = previews.DefaultUnitCamera()
+				}
+				count, err := a.unitGallery.SetUnitPreviewAngle(camera.Rotation, galleryIDs)
+				if err != nil {
+					a.showErrorPopup(err)
+				} else {
+					a.preferences.UnitPreviewAngle = camera.Rotation
+					a.preferences.UnitPreviewAngleSet = true
+					if err := a.preferences.Save(a.preferencesPath); err != nil {
+						a.showErrorPopup(fmt.Errorf("saving Units preview angle: %w", err))
+					} else if count > 0 {
+						unitAngleTooltip = fmt.Sprintf("Angle saved; queued %d existing thumbnails for recapture", count)
+					} else {
+						unitAngleTooltip = "Angle saved. It will persist across app restarts and cache resets."
+					}
+				}
+			}
+			imgui.SetItemTooltip(unitAngleTooltip)
+			statsFor := func(id stingray.FileID) previews.UnitGalleryStats {
+				meta := a.gameData.Metadata[id]
+				return previews.UnitGalleryStats{
+					TriangleCount:   meta.TriangleCount,
+					AllLODTriangles: meta.AllLODTriangles,
+					ModelSize:       meta.ModelSize,
+					ModelExtent:     meta.ModelExtent,
+					FileSize:        a.gameData.fileSize(id),
+				}
+			}
+			selectedID, didSelect = a.unitGallery.DrawGrid(
+				galleryIDs,
+				a.preview.ActiveID(),
+				a.gameData.DisplayFileName,
+				func(id stingray.FileID) string {
+					if inferred, ok := a.gameData.InferredUnitNames[id.Name]; ok {
+						return inferred.Source
+					}
+					return ""
+				},
+				statsFor,
+			)
+		}
+	}
+	imgui.End()
+
+	if a.unitGallery != nil && !windowVisible {
+		a.unitGallery.Suspend()
+	}
+	if !windowVisible || a.unitGallery == nil || a.preview == nil {
+		return
+	}
+	if didSelect {
+		previousID := a.preview.ActiveID()
+		camera, haveCamera := a.unitGallery.CameraFor(selectedID)
+		// Removed resources belong to the selected (older) build, whose preview
+		// renderer is already active. The comparison path is treated as newer.
+		a.activateCurrentPreview()
+		if previousID != selectedID {
+			a.historyPush(previousID, selectedID)
+			a.preview.LoadFile(a.ctx, selectedID, a.preferences.PreviewVideoVerticalResolution, a.gameData.ColorGrading, a.gameData.EntityVarMapping)
+		}
+		if haveCamera {
+			a.preview.SetUnitCamera(camera)
+		} else {
+			camera := previews.DefaultUnitCamera()
+			if loadedCamera, ok := a.preview.UnitCamera(); ok {
+				camera.ModelPos = loadedCamera.ModelPos
+			}
+			a.preview.SetUnitCamera(camera)
+			a.preview.AutoZoomUnitNow()
+		}
+		a.scrollToSelectedFile = true
+		imgui.SetWindowFocusStr(fnt.I.Preview + " Preview")
+	}
+	a.unitGallery.DrawCaptureFrame()
+}
+
+func (a *guiApp) drawLevelGalleryWindow() {
+	const windowName = "Levels"
+	if !a.levelGalleryDockConfigured && a.unitGalleryDockID != 0 {
+		imgui.SetNextWindowDockIDV(a.unitGalleryDockID, imgui.CondFirstUseEver)
+		a.levelGalleryDockConfigured = true
+	}
+	windowVisible := imgui.Begin(windowName)
+	var selectedID stingray.FileID
+	var didSelect bool
+	if windowVisible {
+		switch {
+		case a.gameData == nil:
+			imgui.TextUnformatted("Loading game data...")
+		case a.levelGallery == nil:
+			imgui.TextUnformatted("Preparing the level renderer...")
+		default:
+			if a.gameData != nil {
+				a.levelGallery.SetAssetGradingKey(a.gameData.ColorGrading.Name.String())
+			}
+			a.resetLevelNamesIfNeeded()
+			if !a.levelIDsReady {
+				a.levelIDs = make([]stingray.FileID, 0)
+				for id := range a.gameData.DataDir.Files {
+					if id.Type == stingray.Sum("level") {
+						a.levelIDs = append(a.levelIDs, id)
+					}
+				}
+				slices.SortFunc(a.levelIDs, func(left, right stingray.FileID) int {
+					return strings.Compare(a.gameData.KnownFileNames[left], a.gameData.KnownFileNames[right])
+				})
+				a.levelIDsReady = true
+			}
+			angleTooltip := "Use the current Preview camera angle and recapture existing level thumbnails"
+			if imgui.Button("Set preview angle") {
+				camera, ok := a.preview.UnitCamera()
+				if !ok {
+					camera = previews.DefaultUnitCamera()
+				}
+				count, err := a.levelGallery.SetLevelPreviewAngle(camera.Rotation, a.levelIDs)
+				if err != nil {
+					a.showErrorPopup(err)
+				} else if count > 0 {
+					angleTooltip = fmt.Sprintf("Angle applied; queued %d existing thumbnails for recapture", count)
+				} else {
+					angleTooltip = "Angle saved. Cached thumbnails will use it when they are next rendered."
+				}
+			}
+			imgui.SetItemTooltip(angleTooltip)
+			if a.preview != nil {
+				a.preview.SetHideLevelGround(a.preferences.HideLevelGround)
+			}
+			a.refreshUnitComparison()
+			levelType := stingray.Sum("level")
+			addedLevels := a.comparisonAddedByType[levelType]
+			changedLevels := a.comparisonChangedByType[levelType]
+			removedLevels := a.comparisonRemovedByType[levelType]
+			a.levelGallery.SetVersionChanges(addedLevels, changedLevels, removedLevels)
+			if queued := a.levelGallery.SetHideLevelGround(a.preferences.HideLevelGround, a.levelIDs); queued > 0 {
+				imgui.SameLine()
+				imgui.TextDisabled(fmt.Sprintf("Recapturing %d cached levels", queued))
+			}
+			imgui.SameLine()
+			imgui.TextDisabled("Uses the current Preview view; cached JPEGs are recaptured in the background.")
+
+			statsFor := func(id stingray.FileID) previews.UnitGalleryStats {
+				meta := a.gameData.Metadata[id]
+				return previews.UnitGalleryStats{
+					ModelExtent: meta.ModelExtent,
+					FileSize:    a.gameData.fileSize(id),
+				}
+			}
+			galleryIDs := a.levelIDs
+			a.updateLevelNames(galleryIDs)
+			selectedID, didSelect = a.levelGallery.DrawGrid(
+				galleryIDs,
+				a.preview.ActiveID(),
+				a.levelDisplayName,
+				nil,
+				statsFor,
+			)
+		}
+	}
+	imgui.End()
+
+	if a.levelGallery != nil && !windowVisible {
+		a.levelGallery.Suspend()
+	}
+	if !windowVisible || a.levelGallery == nil || a.preview == nil {
+		return
+	}
+	if didSelect {
+		previousID := a.preview.ActiveID()
+		// The selected build is the old side of the comparison, so removed
+		// levels are available from the current selected-build renderer.
+		a.activateCurrentPreview()
+		if previousID != selectedID {
+			a.historyPush(previousID, selectedID)
+			a.preview.LoadFile(a.ctx, selectedID, a.preferences.PreviewVideoVerticalResolution, a.gameData.ColorGrading, a.gameData.EntityVarMapping)
+		}
+		if camera, ok := a.levelGallery.CameraFor(selectedID); ok {
+			a.preview.SetUnitCamera(camera)
+		} else {
+			camera, ok := a.preview.UnitCamera()
+			if !ok {
+				camera = previews.DefaultUnitCamera()
+			}
+			a.preview.SetUnitCamera(camera)
+			a.preview.AutoZoomUnitNow()
+		}
+		a.scrollToSelectedFile = true
+		imgui.SetWindowFocusStr(fnt.I.Preview + " Preview")
+	}
+	a.levelGallery.DrawCaptureFrame()
+}
+
+func (a *guiApp) activateCurrentPreview() {
+	if a.currentPreview != nil {
+		a.preview = a.currentPreview
+	}
+}
+
+func (a *guiApp) clearOlderBuildPreview() {
+	if a.preview == a.olderBuildPreview {
+		a.activateCurrentPreview()
+	}
+	if a.unitGallery != nil {
+		a.unitGallery.ClearRemovedSource()
+	}
+	if a.levelGallery != nil {
+		a.levelGallery.ClearRemovedSource()
+	}
+	if a.armorSet.gallery != nil {
+		a.armorSet.gallery.ClearRemovedSource()
+	}
+	if a.olderTextureGallery != nil {
+		a.olderTextureGallery.Delete()
+		a.olderTextureGallery = nil
+	}
+	if a.olderBuildPreview != nil {
+		a.olderBuildPreview.Delete()
+	}
+	a.olderBuildPreview = nil
+	a.olderBuildDataDir = nil
+	a.olderBuildArmorSets = nil
+	a.olderBuildArmorTableValid = false
+}
+
+func (a *guiApp) ensureOlderBuildPreview() error {
+	a.unitVersionScan.Lock()
+	dataDir, scanErr := a.unitVersionScan.DataDir, a.unitVersionScan.Err
+	a.unitVersionScan.Unlock()
+	if scanErr != nil {
+		return scanErr
+	}
+	if dataDir == nil {
+		return fmt.Errorf("scan the compared build before viewing its assets")
+	}
+	if a.olderBuildPreview != nil && a.olderBuildDataDir == dataDir && a.olderBuildArmorSets != nil {
+		return nil
+	}
+	oldArmorSets, armorErr := filediverapp.LoadArmorSetsForGameDir(dataDir.Path, a.gameData.LanguageMap)
+	if armorErr != nil {
+		// Older sealed builds may not be readable without the optional game key.
+		// Keep removed-unit preview working while exposing no false kit removals.
+		oldArmorSets = a.gameData.ArmorSets
+	}
+	if a.olderBuildPreview != nil {
+		a.clearOlderBuildPreview()
+	}
+	getResourceGenerator := previews.GetResourceGeneratorFunc(func(_ bool) func(stingray.FileID, stingray.DataType) ([]byte, bool, error) {
+		return func(id stingray.FileID, typ stingray.DataType) ([]byte, bool, error) {
+			data, err := dataDir.Read(id, typ)
+			if err == stingray.ErrFileNotExist || err == stingray.ErrFileDataTypeNotExist {
+				return nil, false, nil
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			return data, true, nil
+		}
+	})
+	identityOverride := func(id stingray.FileID) stingray.FileID { return id }
+	oldPreview, err := previews.NewAutoPreview(
+		a.otoCtx,
+		a.audioSampleRate,
+		a.gameData.Hashes,
+		a.gameData.ThinHashes,
+		false,
+		getResourceGenerator,
+		identityOverride,
+		a.runner,
+		previews.ExtractorPlanetParameters{},
+		previews.ExtractorArmorParameters{
+			ArmorSets: oldArmorSets,
+			SelectedArchives: func() []stingray.Hash {
+				return slices.SortedFunc(maps.Keys(a.selectedArchives), stingray.Hash.Cmp)
+			},
+		},
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("creating older-build preview: %w", err)
+	}
+	animationResources := make([]stingray.FileID, 0)
+	for id := range dataDir.Files {
+		if id.Type == stingray.Sum("animation") {
+			animationResources = append(animationResources, id)
+		}
+	}
+	slices.SortFunc(animationResources, stingray.FileID.Cmp)
+	oldPreview.SetAnimationResources(animationResources)
+	a.olderBuildPreview = oldPreview
+	a.olderBuildDataDir = dataDir
+	a.olderBuildArmorSets = oldArmorSets
+	a.olderBuildArmorTableValid = armorErr == nil
+	return nil
+}
+
+func (a *guiApp) refreshUnitComparison() {
+	if a.gameData == nil {
+		return
+	}
+	a.unitVersionScan.Lock()
+	done, scanErr, oldPath := a.unitVersionScan.Done, a.unitVersionScan.Err, a.unitVersionScan.Path
+	oldDataDir := a.unitVersionScan.DataDir
+	a.unitVersionScan.Unlock()
+	if a.comparisonMatchResults != nil {
+		select {
+		case result := <-a.comparisonMatchResults:
+			a.comparisonMatchRunning = false
+			if result.gameData == a.gameData && result.oldPath == oldPath && a.unitComparisonReady && a.unitComparisonGameData == a.gameData {
+				for fileType, pairs := range result.pairs {
+					changed := make(map[stingray.FileID]struct{}, len(pairs))
+					validPairs := make(map[stingray.FileID]stingray.FileID, len(pairs))
+					for currentID, olderID := range pairs {
+						if currentID == olderID {
+							changed[currentID] = struct{}{}
+							validPairs[currentID] = olderID
+							continue
+						}
+						if _, isAdded := a.comparisonAddedByType[fileType][currentID]; !isAdded {
+							continue
+						}
+						if _, isRemoved := a.comparisonRemovedByType[fileType][olderID]; !isRemoved {
+							continue
+						}
+						delete(a.comparisonAddedByType[fileType], currentID)
+						delete(a.comparisonRemovedByType[fileType], olderID)
+						changed[currentID] = struct{}{}
+						validPairs[currentID] = olderID
+					}
+					a.comparisonChangedByType[fileType] = changed
+					a.comparisonChangedPairs[fileType] = validPairs
+				}
+				a.unitComparisonAdded = a.comparisonAddedByType[stingray.Sum("unit")]
+				a.unitComparisonRemoved = a.comparisonRemovedByType[stingray.Sum("unit")]
+				if a.unitGallery != nil {
+					a.unitGallery.SetVersionChanges(a.unitComparisonAdded, a.comparisonChangedByType[stingray.Sum("unit")], a.unitComparisonRemoved)
+				}
+				if a.levelGallery != nil {
+					typ := stingray.Sum("level")
+					a.levelGallery.SetVersionChanges(a.comparisonAddedByType[typ], a.comparisonChangedByType[typ], a.comparisonRemovedByType[typ])
+				}
+			}
+		default:
+		}
+	}
+	if !done || scanErr != nil {
+		if a.unitComparisonReady {
+			a.unitComparisonAdded = nil
+			a.unitComparisonRemoved = nil
+			a.comparisonAddedByType = nil
+			a.comparisonRemovedByType = nil
+			a.comparisonChangedByType = nil
+			a.comparisonChangedPairs = nil
+			a.comparisonMatchRunning = false
+			a.unitComparisonReady = false
+			a.unitComparisonGameData = nil
+			if a.unitGallery != nil {
+				a.unitGallery.SetVersionChanges(nil, nil, nil)
+			}
+			if a.levelGallery != nil {
+				a.levelGallery.SetVersionChanges(nil, nil, nil)
+			}
+		}
+		return
+	}
+	if a.unitComparisonReady && a.unitComparisonGameData == a.gameData && a.unitComparisonOldPath == oldPath {
+		return
+	}
+	// The loaded/selected game is the baseline (older) build. The folder in
+	// Compare is the newer build, so additions come from that folder and
+	// removals are resources that exist only in the selected build.
+	newDataDir := oldDataDir
+	selectedOldDataDir := a.gameData.DataDir
+	addedByType := make(map[stingray.Hash]map[stingray.FileID]struct{})
+	removedByType := make(map[stingray.Hash]map[stingray.FileID]struct{})
+	for _, fileType := range []stingray.Hash{stingray.Sum("unit"), stingray.Sum("level"), stingray.Sum("texture"), stingray.Sum("strings")} {
+		current := make(map[stingray.FileID]struct{})
+		added := make(map[stingray.FileID]struct{})
+		removed := make(map[stingray.FileID]struct{})
+		for id := range newDataDir.Files {
+			if id.Type != fileType {
+				continue
+			}
+			current[id] = struct{}{}
+			if _, exists := selectedOldDataDir.Files[id]; !exists {
+				added[id] = struct{}{}
+			}
+		}
+		for id := range selectedOldDataDir.Files {
+			if id.Type != fileType {
+				continue
+			}
+			if _, exists := newDataDir.Files[id]; !exists {
+				removed[id] = struct{}{}
+			}
+		}
+		addedByType[fileType] = added
+		removedByType[fileType] = removed
+	}
+	added := addedByType[stingray.Sum("unit")]
+	removed := removedByType[stingray.Sum("unit")]
+	a.unitComparisonAdded = added
+	a.unitComparisonRemoved = removed
+	a.comparisonAddedByType = addedByType
+	a.comparisonRemovedByType = removedByType
+	a.comparisonChangedByType = make(map[stingray.Hash]map[stingray.FileID]struct{})
+	a.comparisonChangedPairs = make(map[stingray.Hash]map[stingray.FileID]stingray.FileID)
+	for _, fileType := range []stingray.Hash{stingray.Sum("unit"), stingray.Sum("level")} {
+		a.comparisonChangedByType[fileType] = make(map[stingray.FileID]struct{})
+	}
+	a.unitComparisonReady = true
+	a.unitComparisonGameData = a.gameData
+	a.unitComparisonOldPath = oldPath
+	if a.unitGallery != nil {
+		a.unitGallery.SetVersionChanges(added, a.comparisonChangedByType[stingray.Sum("unit")], removed)
+	}
+	if a.comparisonMatchResults == nil {
+		a.comparisonMatchResults = make(chan versionMatchResult, 1)
+	}
+	a.comparisonMatchRunning = true
+	matchContext, data := a.ctx, a.gameData
+	go func() {
+		pairs := findLikelyVersionReplacements(matchContext, data, newDataDir, selectedOldDataDir, addedByType, removedByType)
+		select {
+		case a.comparisonMatchResults <- versionMatchResult{gameData: data, oldPath: oldPath, pairs: pairs}:
+		case <-matchContext.Done():
+		}
+	}()
+}
+
+func textureFileSize(dataDir *stingray.DataDir, id stingray.FileID) uint64 {
+	if dataDir == nil {
+		return 0
+	}
+	fileInfos := dataDir.Files[id]
+	if len(fileInfos) == 0 {
+		return 0
+	}
+	var size uint64
+	for _, typ := range [...]stingray.DataType{stingray.DataMain, stingray.DataStream, stingray.DataGPU} {
+		size += uint64(fileInfos[0].Files[typ].Size)
+	}
+	return size
+}
+
+func (a *guiApp) drawUnitVersionCompareWindow() {
+	if !a.unitGalleryDockConfigured && a.unitGalleryDockID != 0 {
+		imgui.SetNextWindowDockIDV(a.unitGalleryDockID, imgui.CondFirstUseEver)
+	}
+	if imgui.Begin("Compare") {
+		if a.gameData == nil {
+			imgui.TextUnformatted("Load the current game build first.")
+		} else {
+			imgui.TextUnformatted("Compare the selected build (older baseline) with a newer Helldivers 2 installation.")
+			imgui.SetNextItemWidth(max(imutils.S(200), imgui.ContentRegionAvail().X-imutils.S(130)))
+			imgui.InputTextWithHint("##OldUnitBuildPath", "Newer game folder or data folder", &a.unitComparePath, 0, nil)
+			imgui.SameLine()
+			if imgui.Button("Browse…") {
+				if path, err := zenity.SelectFile(zenity.Title("Select newer Helldivers 2 installation"), zenity.Directory()); err == nil {
+					a.unitComparePath = path
+				}
+			}
+			imgui.SameLine()
+			a.unitVersionScan.Lock()
+			scanning := !a.unitVersionScan.Done && a.unitVersionScan.Path != ""
+			a.unitVersionScan.Unlock()
+			imgui.BeginDisabledV(strings.TrimSpace(a.unitComparePath) == "" || scanning)
+			if imgui.Button("Scan compared build") {
+				a.preferences.UnitComparePath = strings.TrimSpace(a.unitComparePath)
+				if err := a.preferences.Save(a.preferencesPath); err != nil {
+					a.showErrorPopup(fmt.Errorf("saving older-build comparison path: %w", err))
+				}
+				a.clearOlderBuildPreview()
+				a.unitComparisonReady = false
+				a.unitComparisonAdded = nil
+				a.unitComparisonRemoved = nil
+				a.unitComparisonGameData = nil
+				a.comparisonAddedByType = nil
+				a.comparisonRemovedByType = nil
+				a.comparisonChangedByType = nil
+				a.comparisonChangedPairs = nil
+				a.comparisonMatchRunning = false
+				if a.unitGallery != nil {
+					a.unitGallery.SetVersionChanges(nil, nil, nil)
+				}
+				if a.levelGallery != nil {
+					a.levelGallery.SetVersionChanges(nil, nil, nil)
+				}
+				a.unitVersionScan.GoScan(a.ctx, strings.TrimSpace(a.unitComparePath))
+			}
+			imgui.EndDisabled()
+
+			a.unitVersionScan.Lock()
+			done, progress, scanErr := a.unitVersionScan.Done, a.unitVersionScan.Progress, a.unitVersionScan.Err
+			a.unitVersionScan.Unlock()
+			if scanning {
+				imgui.ProgressBarV(progress, imgui.NewVec2(-1, 0), "Scanning compared build...")
+			} else if done && scanErr != nil {
+				imutils.TextError(scanErr)
+			} else if done && scanErr == nil {
+				a.refreshUnitComparison()
+				if err := a.ensureOlderBuildPreview(); err != nil {
+					imutils.TextError(err)
+				}
+				currentCount := 0
+				for id := range a.gameData.DataDir.Files {
+					if id.Type == stingray.Sum("unit") {
+						currentCount++
+					}
+				}
+				imgui.Separator()
+				imgui.TextUnformatted(fmt.Sprintf("Selected older build: %d units", currentCount))
+				imgui.TextUnformatted(fmt.Sprintf("Added in compared newer build: %d", len(a.unitComparisonAdded)))
+				imgui.TextUnformatted(fmt.Sprintf("Changed / likely replaced units: %d", len(a.comparisonChangedByType[stingray.Sum("unit")])))
+				imgui.TextUnformatted(fmt.Sprintf("Removed from compared newer build: %d", len(a.unitComparisonRemoved)))
+				levelType := stingray.Sum("level")
+				imgui.TextUnformatted(fmt.Sprintf("Levels: %d added, %d changed / likely replaced, %d removed", len(a.comparisonAddedByType[levelType]), len(a.comparisonChangedByType[levelType]), len(a.comparisonRemovedByType[levelType])))
+				if a.comparisonMatchRunning {
+					imgui.TextDisabled("Comparing resource names and level contents to find likely replacements…")
+				}
+				imgui.TextDisabled("New, Changed, and Removed filters are also available in the Units and Levels grids. Removed entries come from the selected build; New entries come from the compared build.")
+				a.drawUnitChangeList("Added units", a.unitComparisonAdded, true)
+				a.drawChangedResourceList("Likely changed units", a.comparisonChangedPairs[stingray.Sum("unit")])
+				a.drawUnitChangeList("Removed units", a.unitComparisonRemoved, false)
+				a.drawChangedResourceList("Likely changed levels", a.comparisonChangedPairs[levelType])
+			}
+		}
+	}
+	imgui.End()
+}
+
+func (a *guiApp) drawChangedResourceList(label string, pairs map[stingray.FileID]stingray.FileID) {
+	if len(pairs) == 0 || !imgui.CollapsingHeaderBoolPtr(label+fmt.Sprintf(" (%d)", len(pairs)), nil) {
+		return
+	}
+	currentIDs := slices.SortedFunc(maps.Keys(pairs), stingray.FileID.Cmp)
+	imgui.BeginChildStrV("##"+label, imgui.NewVec2(0, imutils.S(180)), imgui.ChildFlagsBorders, imgui.WindowFlagsNone)
+	clipper := imgui.NewListClipper()
+	clipper.Begin(int32(len(currentIDs)))
+	for clipper.Step() {
+		for row := clipper.DisplayStart(); row < clipper.DisplayEnd(); row++ {
+			currentID := currentIDs[row]
+			olderID := pairs[currentID]
+			currentName := a.gameData.DisplayFileName(currentID)
+			olderName := a.gameData.DisplayFileName(olderID)
+			text := fmt.Sprintf("%s  ←  %s", currentName, olderName)
+			if currentID == olderID {
+				text = currentName + "  (resource data changed at the same path)"
+			}
+			if imgui.SelectableBool(text) {
+				clipboard.Write(clipboard.FmtText, []byte(currentID.Name.String()))
+			}
+			if imgui.IsItemHovered() {
+				imgui.SetTooltip("Likely replacement: current-build hash ← older-build hash. Click to copy the current hash.")
+			}
+		}
+	}
+	imgui.EndChild()
+}
+
+func (a *guiApp) drawUnitChangeList(label string, ids map[stingray.FileID]struct{}, current bool) {
+	if !imgui.CollapsingHeaderBoolPtr(label+fmt.Sprintf(" (%d)", len(ids)), nil) {
+		return
+	}
+	ordered := slices.SortedFunc(maps.Keys(ids), stingray.FileID.Cmp)
+	imgui.BeginChildStrV("##"+label, imgui.NewVec2(0, imutils.S(180)), imgui.ChildFlagsBorders, imgui.WindowFlagsNone)
+	clipper := imgui.NewListClipper()
+	clipper.Begin(int32(len(ordered)))
+	for clipper.Step() {
+		for row := clipper.DisplayStart(); row < clipper.DisplayEnd(); row++ {
+			id := ordered[row]
+			name := id.Name.String()
+			if current && a.gameData != nil {
+				name = a.gameData.DisplayFileName(id)
+			}
+			labelText := fmt.Sprintf("%s  (%s)", name, id.Name.String())
+			if imgui.SelectableBool(labelText) {
+				clipboard.Write(clipboard.FmtText, []byte(id.Name.String()))
+			}
+			if imgui.IsItemHovered() {
+				imgui.SetTooltip("Click to copy unit hash")
+			}
+		}
+	}
+	imgui.EndChild()
+}
+
+func (a *guiApp) drawTextureGalleryWindow() {
+	windowName := fnt.I.Image + " Textures"
+	if !imgui.Begin(windowName) {
+		imgui.End()
+		return
+	}
+	defer imgui.End()
+	if a.gameData == nil || a.preview == nil {
+		imgui.TextUnformatted("Loading game data...")
+		return
+	}
+	a.refreshUnitComparison()
+	if !a.textureIDsReady {
+		for id := range a.gameData.DataDir.Files {
+			if id.Type == stingray.Sum("texture") {
+				a.textureIDs = append(a.textureIDs, id)
+			}
+		}
+		a.textureIDsReady = true
+	}
+	width := imgui.ContentRegionAvail().X
+	imgui.SetNextItemWidth(max(imutils.S(120), width-imutils.S(800)))
+	imgui.InputTextWithHint("##TextureGallerySearch", fnt.I.Search+" Filter textures...", &a.textureQuery, 0, nil)
+	imgui.SameLine()
+	imgui.Checkbox("Sharp", &a.texturePixelated)
+	imgui.SetItemTooltip("Use nearest-pixel filtering to remove thumbnail blur")
+	imgui.SameLine()
+	imgui.Checkbox("256 px", &a.texture256px)
+	imgui.SetItemTooltip("Limit decoded thumbnails to 256 pixels per side")
+	imgui.SameLine()
+	imgui.SetNextItemWidth(imutils.S(140))
+	if a.textureGridScale == 0 {
+		a.textureGridScale = 1
+	}
+	imgui.SliderFloat("Grid scale", &a.textureGridScale, 0.5, 1.5)
+	imgui.SameLine()
+	imgui.SetNextItemWidth(imutils.S(155))
+	sortLabels := []string{"Name", "File size", "Resolution"}
+	if a.unitComparisonReady {
+		sortLabels = append(sortLabels, "New", "Removed")
+	} else if a.textureSort >= 3 {
+		a.textureSort = 0
+	}
+	if a.textureSort >= len(sortLabels) {
+		a.textureSort = 0
+	}
+	if imgui.BeginCombo("Sort by", sortLabels[a.textureSort]) {
+		for i, label := range sortLabels {
+			if imgui.SelectableBool(label) {
+				a.textureSort = i
+			}
+		}
+		imgui.EndCombo()
+	}
+	imgui.SameLine()
+	direction := "Ascending"
+	if a.textureDescending {
+		direction = "Descending"
+	}
+	if imgui.Button(fnt.I.Sort + " " + direction) {
+		a.textureDescending = !a.textureDescending
+	}
+	if a.textureGallery != nil {
+		maxDim := 512
+		if a.texture256px {
+			maxDim = 256
+		}
+		if a.textureSort == 3 {
+			if err := a.ensureOlderBuildPreview(); err != nil {
+				imutils.TextError(err)
+			} else if a.olderTextureGallery == nil {
+				a.olderTextureGallery = a.olderBuildPreview.NewTextureGallery()
+			}
+			if a.olderTextureGallery != nil {
+				a.olderTextureGallery.BeginFrame(maxDim, a.texturePixelated)
+			}
+		} else {
+			a.textureGallery.BeginFrame(maxDim, a.texturePixelated)
+		}
+	}
+	ids := make([]stingray.FileID, 0, len(a.textureIDs))
+	query := strings.ToLower(a.textureQuery)
+	textureType := stingray.Sum("texture")
+	versionSet := map[stingray.FileID]struct{}(nil)
+	if a.textureSort == 3 {
+		versionSet = a.comparisonAddedByType[textureType]
+	} else if a.textureSort == 4 {
+		versionSet = a.comparisonRemovedByType[textureType]
+	}
+	appendIfMatch := func(id stingray.FileID) {
+		name := a.gameData.LookupHash(id.Name)
+		if query == "" || strings.Contains(strings.ToLower(name), query) || strings.Contains(strings.ToLower(id.Name.String()), query) {
+			ids = append(ids, id)
+		}
+	}
+	if a.textureSort == 3 || a.textureSort == 4 {
+		for id := range versionSet {
+			appendIfMatch(id)
+		}
+	} else {
+		for _, id := range a.textureIDs {
+			appendIfMatch(id)
+		}
+	}
+	slices.SortFunc(ids, func(left, right stingray.FileID) int {
+		lm, rm := a.gameData.Metadata[left], a.gameData.Metadata[right]
+		leftDir, rightDir := a.gameData.DataDir, a.gameData.DataDir
+		if a.textureSort == 3 {
+			leftDir, rightDir = a.unitVersionScan.DataDir, a.unitVersionScan.DataDir
+		}
+		var result int
+		switch a.textureSort {
+		case 1:
+			result = cmp.Compare(textureFileSize(leftDir, left), textureFileSize(rightDir, right))
+		case 2:
+			result = cmp.Compare(lm.Width*lm.Height, rm.Width*rm.Height)
+			if result == 0 {
+				result = cmp.Compare(textureFileSize(leftDir, left), textureFileSize(rightDir, right))
+			}
+		default:
+			result = strings.Compare(a.gameData.LookupHash(left.Name), a.gameData.LookupHash(right.Name))
+		}
+		if a.textureDescending {
+			result = -result
+		}
+		return result
+	})
+	imgui.TextUnformatted(fmt.Sprintf("%d textures", len(ids)))
+	gridContent := imgui.ContentRegionAvail()
+	// Keep the texture columns at a stable width while the table scrollbar is
+	// updated as thumbnail rows are decoded and uploaded.
+	gridWidth := max(0, gridContent.X-imgui.CurrentStyle().ScrollbarSize())
+	cell := imutils.S(190 * a.textureGridScale)
+	spacing := imgui.CurrentStyle().ItemSpacing().X
+	columns := max(1, int((gridWidth+spacing)/(cell+spacing)))
+	cell = (gridWidth - spacing*float32(columns-1)) / float32(columns)
+	if imgui.BeginTableV("##TextureGalleryGrid", int32(columns), imgui.TableFlagsSizingFixedFit|imgui.TableFlagsScrollY, imgui.NewVec2(gridWidth, gridContent.Y), 0) {
+		for range columns {
+			imgui.TableSetupColumnV("", imgui.TableColumnFlagsWidthFixed, cell, 0)
+		}
+		clipper := imgui.NewListClipper()
+		clipper.Begin(int32((len(ids) + columns - 1) / columns))
+		for clipper.Step() {
+			for row := clipper.DisplayStart(); row < clipper.DisplayEnd(); row++ {
+				imgui.TableNextRow()
+				for col := 0; col < columns; col++ {
+					imgui.TableNextColumn()
+					idx := int(row)*columns + col
+					if idx >= len(ids) {
+						break
+					}
+					id := ids[idx]
+					meta := a.gameData.Metadata[id]
+					gallery := a.textureGallery
+					if a.textureSort == 3 {
+						gallery = a.olderTextureGallery
+					}
+					pos := imgui.CursorScreenPos()
+					imageSize := min(cell-imutils.S(12), imutils.S(160*a.textureGridScale))
+					imagePos := pos.Add(imgui.NewVec2((cell-imageSize)*0.5, 0))
+					imgui.PushIDStr(id.Name.String())
+					clickedImage := false
+					if gallery != nil {
+						clickedImage = gallery.DrawThumbnail(id, imagePos, imgui.NewVec2(imageSize, imageSize))
+					}
+					imgui.PopID()
+					imgui.SetCursorScreenPos(pos.Add(imgui.NewVec2(0, imageSize+imutils.S(4))))
+					textureDir := a.gameData.DataDir
+					if a.textureSort == 3 {
+						textureDir = a.unitVersionScan.DataDir
+					}
+					label := fmt.Sprintf("%s · %dx%d\n%s · %d KiB", filepath.Base(a.gameData.LookupHash(id.Name)), meta.Width, meta.Height, meta.Format, textureFileSize(textureDir, id)/1024)
+					if a.textureSort == 3 {
+						label = fmt.Sprintf("%s · compared build\n%d KiB", filepath.Base(a.gameData.LookupHash(id.Name)), textureFileSize(textureDir, id)/1024)
+					}
+					clickedCard := imgui.ButtonV(label, imgui.NewVec2(cell, imutils.S(48)))
+					if clickedImage || clickedCard {
+						if a.textureSort == 3 {
+							if err := a.ensureOlderBuildPreview(); err == nil {
+								previous := a.preview.ActiveID()
+								a.preview = a.olderBuildPreview
+								a.historyPush(previous, id)
+								a.preview.LoadFile(a.ctx, id, a.preferences.PreviewVideoVerticalResolution, stingray.FileID{}, nil)
+							}
+						} else {
+							a.activateCurrentPreview()
+							a.historyPush(a.preview.ActiveID(), id)
+							a.preview.LoadFile(a.ctx, id, a.preferences.PreviewVideoVerticalResolution, a.gameData.ColorGrading, a.gameData.EntityVarMapping)
+						}
+						a.scrollToSelectedFile = true
+						imgui.SetWindowFocusStr(fnt.I.Preview + " Preview")
+					}
+				}
+			}
+		}
+		imgui.EndTable()
+	}
+}
+
 func (a *guiApp) drawSettingsWindow() {
 	if a.gameData == nil || a.preview == nil {
 		return
 	}
+	hideGroundBefore := a.preferences.HideLevelGround
 	a.preview.DrawSettings()
+	hideGroundAfter := a.preview.HideLevelGround()
+	if hideGroundAfter == hideGroundBefore {
+		return
+	}
+	a.preferences.HideLevelGround = hideGroundAfter
+	if err := a.preferences.Save(a.preferencesPath); err != nil {
+		a.showErrorPopup(err)
+	}
+	if a.currentPreview != nil {
+		a.currentPreview.SetHideLevelGround(hideGroundAfter)
+	}
+	if a.olderBuildPreview != nil {
+		a.olderBuildPreview.SetHideLevelGround(hideGroundAfter)
+	}
+	if a.levelGallery != nil && a.levelIDsReady {
+		if queued := a.levelGallery.SetHideLevelGround(hideGroundAfter, a.levelIDs); queued > 0 {
+			fmt.Printf("recapturing %d cached level thumbnails after ground visibility change\n", queued)
+		}
+	}
 }
 
 func (a *guiApp) drawCheckForUpdatesPopup(state *imgui_wrapper.State) {
@@ -1611,6 +2707,11 @@ resolutions may cause low frame rates and poor responsiveness.`)
 		imgui.BeginDisabledV(a.preferences == a.defaultPreferences)
 		if imgui.ButtonV(fnt.I.Undo+" Reset all preferences", imgui.NewVec2(imgui.ContentRegionAvail().X, 0)) {
 			a.preferences = a.defaultPreferences
+			if a.unitGallery != nil {
+				if _, err := a.unitGallery.SetUnitPreviewAngle(a.defaultPreferences.UnitPreviewAngle, a.unitIDs); err != nil {
+					a.showErrorPopup(err)
+				}
+			}
 		}
 		imgui.EndDisabled()
 

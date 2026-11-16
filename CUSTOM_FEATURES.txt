@@ -1,0 +1,72 @@
+EVIL AI FILEDIVER — CUSTOM FEATURE CHANGE LIST
+================================================
+
+This file lists the custom additions and modifications carried in this fork relative to the upstream Filediver source. It is a source-level feature inventory, not a claim that every experimental renderer or reverse-engineered result is game-perfect. Upstream Filediver functionality, documentation, credits, and license remain in the repository.
+
+APP WINDOWS AND BROWSING
+------------------------
+* Adds dedicated Animation, Levels, Textures, String Search, Compare, State Machines, and Armor Set windows alongside the original Preview, Units, and Metadata views.
+* Adds grid browsers for units, textures, levels, and full armor sets, with adjustable grid scale and configurable preview angles where supported.
+* Adds unit-grid filters and sorts, including animation availability, file size, triangle counts, model bounds/scale, and build comparison status.
+* Adds persistent preview-angle preferences and disk-backed thumbnail support/caching for gallery previews.
+* Adds texture image previews, sharp-display and reduced-resolution options, grid sorting by resolution and size, and opening a selected texture in the preview.
+* Adds inferred readable level labels based on level contents and referenced resource paths, retaining the resource hash as an identifier.
+* Adds a unit-use scanner that reports levels and prefab placements referencing the selected unit; clicking a result navigates to that level.
+
+BUILD COMPARISON
+----------------
+* Adds scanning of a second game installation/build and indexes resource IDs by type.
+* Adds New, Removed, and likely Changed/replaced resource comparisons. Changed is inferred from matching/name/reference evidence and should be treated as a likely replacement classification, not proof of semantic equivalence.
+* Exposes applicable comparison filters in unit, level, texture, string, and armor-set views. Removed resources can be previewed from the older/selected build where supported.
+* Adds armor kit-table comparison support and the ability to populate an older kit table for one-time comparisons.
+
+STRING AND GAME-DATA SEARCH
+---------------------------
+* Adds localized string and unit-name search across indexed game data, including multi-phrase queries and faction classification where the available data supports it.
+* Adds filters for English (US), data-like strings, subtitle-like strings, and non-string records.
+* Highlights the exact query text in displayed results and supports sortable result columns and comparison filters.
+* Adds navigation from a string result to its source resource, and subtitle/audio relationship lookup that selects the linked audio record and opens the Preview view.
+* Adds bundled subtitle-to-audio reference data and its required third-party notice/license files.
+* Adds curated and inferred unit/level name resolution, hash/path discovery helpers, and research utilities for producing evidence about unresolved resource names.
+
+ANIMATION AND STATE-MACHINE INSPECTION
+--------------------------------------
+* Adds a state-machine explorer for states, layers, clip/blend states, animation resources, transitions, events, variables, blend masks, and unit references.
+* Adds resizable state-machine panes and animation-resource selection that can open/preview the referenced clip.
+* Adds a unit animation player with playback controls and playback of linked clips/blends where the parsed state-machine data provides those links.
+* Adds a 'has animations' unit filter driven by a build scan of unit and state-machine references.
+* Adds experimental hitbox and damage-volume overlays in Preview and Animation views. Havok collision hitboxes are shown separately from parsed attack/damage volumes, with optional readouts for available damage and armor values. These overlays depend on the resources and fields present in a given build.
+
+ARMOR SETS AND MOUNTED PARTS
+----------------------------
+* Adds an armor-set browser that assembles armor pieces from kit tables, previews full sets, identifies linked capes when data allows, and selects set resources for export.
+* Adds set preview-angle controls and comparison-aware handling of older/removed kit entries.
+* Adds armor animation-preview handoff so a selected armor set can be viewed with character animation playback.
+* Adds on-the-fly discovery and preview of mounted/attached unit models using available attachment-point metadata, including referenced materials and textures.
+* Adds controls for applying available damage-model mesh visibility states to previews.
+
+LEVEL VISIBILITY AND PREVIEW CONTROLS
+-------------------------------------
+* Adds level-specific visibility controls for selected helper/volume categories, including trigger/kill volumes and ground patches, where those objects can be identified from level data.
+* Adds tree/visibility controls and filters for inspecting level contents and reducing obstruction from helper geometry.
+* Adds visibility controls for certain special-purpose or incorrectly surfaced level objects when the resource structure can distinguish them.
+
+RENDERER, MATERIALS, AND FORMAT SUPPORT
+---------------------------------------
+* Extends the custom preview renderer with additional material/shader paths for terrain and legacy rocks, Illuminate architecture, glass, cyborg trim, platform kits, and related fallback cases.
+* Improves material texture-slot resolution, normal-map handling, alpha/blending behavior, and compatibility with material variants encountered in Helldivers assets.
+* Adds renderer handling for older Helldivers package/unit data in the HD1-specific parsing paths included in this source tree.
+* Improves parsing and preview robustness for mesh groups, packed normals, physics resources, state-machine data, strings, and older/variant vertex attribute formats.
+* Adds experimental support for damage-box visualization and animation skinning in the custom preview shaders.
+
+ADDITIONAL SOURCE TOOLS AND DATA
+-------------------------------
+* Adds path-discovery and unit-evidence command-line utilities for extracting evidence-based labels from indexed resources.
+* Adds game-data lookup tables and curated hash/path labels to improve readability for resources whose names are not stored directly in the archive.
+* Adds Wwise stream hash-generation support and additional reference data used by the GUI tools.
+
+NOTES
+-----
+* Many game resources are hash-addressed and some names/relationships are inferred. The GUI preserves hashes so inferred labels can be traced back to exact resources.
+* Rendering, animation, attachment discovery, and damage-volume interpretation are reverse-engineered approximations. Unusual assets may still render incorrectly or lack enough metadata for a complete result.
+* No game archives are included. Users must point Filediver at their own game data and follow applicable game/platform terms.

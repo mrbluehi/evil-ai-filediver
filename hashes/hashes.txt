@@ -175771,3 +175771,4 @@ zipper_grenade
 ~=core/stingray_renderer/shading_environment_components/water_surface
 ~S=core/stingray_renderer/shading_environment_components/water_surface
 ~jw)=
+content/env_ship/armory/rifle_13mm
