@@ -98,6 +98,8 @@ The program is called "filediver.exe" (or just "filediver" on Linux). See [usage
 - [Helldivers Archive Discord server](https://discord.gg/y7P38h2B9Q)
 
 ## Credits
+- This fork is built on the original Filediver project by xypwn and its contributors; their work made the custom additions possible.
+- Thanks to Grpprofesional for inspiration and community input related to armor viewing.
 - Filediver icon by @gobashroom on [HD2 Modding Discord](https://discord.gg/helldiversmodding)
 - This app builds on a lot of work from other people. This includes:
 	- [Hellextractor by Xaymar](https://github.com/Xaymar/Hellextractor)
