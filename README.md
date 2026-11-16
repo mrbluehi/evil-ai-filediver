@@ -28,7 +28,7 @@ Examples of Factory Strider and Bile Titan animation playback in the custom anim
 
 See [CUSTOM_FEATURES.txt](CUSTOM_FEATURES.txt) for a detailed inventory of the additions in this fork that are not part of upstream Filediver.
 
-> The download links below refer to upstream Filediver releases. They are provided for the original app and helper scripts; they are not builds of this custom fork. Build this fork from source using the instructions below, or use a fork-specific release if one is published later.
+> Official releases for this fork are published on [Evil AI Filediver Releases](https://github.com/mrbluehi/evil-ai-filediver/releases). They include the custom features described here; upstream Filediver releases are separate.
 
 ## Build this fork
 
@@ -41,10 +41,10 @@ go run ./cmd/filediver-gui
 The GUI uses native graphics/audio bindings and therefore needs the platform build prerequisites used by upstream Filediver (including CGO and a C compiler on Windows). The CI workflow and upstream hacking notes below describe the repository build setup.
 
 ## Download
-### Filediver (upstream project) GUI (graphical interface with preview)
+### Evil AI Filediver GUI (graphical interface with preview)
 ![GUI Screenshot](screenshots/gui.png)
-- [Download GUI Windows (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/filediver-gui-windows.exe)
-- [Download GUI Linux (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/filediver-gui-linux)
+- [Download GUI Windows (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/filediver-gui-windows.exe)
+- [Download GUI Linux (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/filediver-gui-linux)
 
 **Simply download and run. It's highly recommended to install all extensions when prompted.**
 
@@ -66,17 +66,17 @@ The GUI uses native graphics/audio bindings and therefore needs the platform bui
 	- Create a new text file called `filediver-scripts_version` (NO EXTENSION). Edit the file with notepad, type in the latest version of filediver (e.g. `v0.6.15`) and hit save.
 </details>
 
-### Filediver (upstream project) CLI (command-line interface)
-- [Download CLI Windows (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/filediver-cli-windows.zip)
-- [Download CLI Linux (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/filediver-cli-linux.zip)
+### Evil AI Filediver CLI (command-line interface)
+- [Download CLI Windows (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/filediver-cli-windows.zip)
+- [Download CLI Linux (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/filediver-cli-linux.zip)
 
 **Extract the archive. This will create a folder named `filediver`, where everything relevant is located.**
 
 The program is called "filediver.exe" (or just "filediver" on Linux). See [usage](#usage).
 
 ### Helper scripts (scripts_dist)
-- [Windows (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/scripts-dist-windows.zip)
-- [Linux (64-bit)](https://github.com/xypwn/filediver/releases/latest/download/scripts-dist-linux.tar.xz)
+- [Windows (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/scripts-dist-windows.zip)
+- [Linux (64-bit)](https://github.com/mrbluehi/evil-ai-filediver/releases/latest/download/scripts-dist-linux.tar.xz)
 
 **CLI Only: Extract the helper scripts achive into the `filediver` folder (the same folder containing the executable, e.g. `filediver.exe`).**
 

@@ -806,6 +806,11 @@ func (pv *UnitPreviewState) drawAnimationSummary() {
 }
 
 func (pv *UnitPreviewState) mapAnimationBones(clip *animation.Animation) []int {
+	// Root-motion reference belongs to one clip/state selection. Capture a fresh
+	// in-place origin from its first sampled pose instead of assuming the rig's
+	// bind pose and the clip's first frame have identical root translations.
+	pv.animationRootReference = mgl32.Vec3{}
+	pv.animationRootReferenceValid = false
 	info := pv.rootUnitInfo
 	if info == nil || clip == nil || clip.Header.BoneCount == 0 {
 		pv.animationRootBone = -1
@@ -909,18 +914,21 @@ func findAnimationRootBone(info *unit.Info, mapping []int, lookupThinHash func(s
 	return bestIndex
 }
 
-// animationRootMotionCorrection moves the displayed model's animated root back
-// to its bind-pose location. Damage and hitbox overlays intentionally use the
-// uncorrected base scene matrix because their authored transforms were drifting
-// when this preview-only adjustment was applied to them.
+// animationRootMotionCorrection cancels horizontal root translation relative
+// to the clip's first sampled pose. Damage and hitbox overlays intentionally
+// use the uncorrected base scene matrix so their authored transforms stay tied
+// to the animation rather than the in-place display adjustment.
 func (pv *UnitPreviewState) animationRootMotionCorrection() mgl32.Vec3 {
 	if !pv.animationEnabled || pv.rootUnitInfo == nil || pv.animationRootBone < 0 ||
-		pv.animationRootBone >= len(pv.rootUnitInfo.Bones) || pv.animationRootBone >= len(pv.animationGlobals) {
+		pv.animationRootBone >= len(pv.rootUnitInfo.Bones) || pv.animationRootBone >= len(pv.animationGlobals) ||
+		!pv.animationRootReferenceValid {
 		return mgl32.Vec3{}
 	}
-	bindPosition := pv.rootUnitInfo.Bones[pv.animationRootBone].Matrix.Col(3).Vec3()
 	animatedPosition := pv.animationGlobals[pv.animationRootBone].Col(3).Vec3()
-	correction := bindPosition.Sub(animatedPosition)
+	correction := pv.animationRootReference.Sub(animatedPosition)
+	// Y is up in the preview coordinate system. Cancel locomotion on the ground
+	// plane while retaining root-bone bobbing and other vertical body motion.
+	correction[1] = 0
 	for axis := range 3 {
 		if float32IsNaNOrInf(correction[axis]) {
 			return mgl32.Vec3{}
@@ -1141,6 +1149,10 @@ func (pv *UnitPreviewState) updateAnimationPose() {
 	}
 	for i := range info.Bones {
 		resolveGlobal(i)
+	}
+	if !pv.animationRootReferenceValid && pv.animationRootBone >= 0 && pv.animationRootBone < len(globals) {
+		pv.animationRootReference = globals[pv.animationRootBone].Col(3).Vec3()
+		pv.animationRootReferenceValid = true
 	}
 	pv.refreshMountedAttachmentTransforms(pv.rootHash, globals)
 	for fileID, objects := range pv.objects {

@@ -245,16 +245,18 @@ type UnitPreviewState struct {
 
 	fibonacciNormalLut [][4]float32
 
-	skeletonPositions    map[stingray.FileID][]mgl32.Vec3
-	skeletonBoneIndices  map[stingray.FileID][]int
-	rootUnitInfo         *unit.Info
-	animationBoneMap     []int
-	animationLocals      []mgl32.Mat4
-	animationGlobals     []mgl32.Mat4
-	animationRootBone    int
-	animationPlayer      animationPlayback
-	animationEnabled     bool
-	animationResourceIDs []stingray.FileID
+	skeletonPositions           map[stingray.FileID][]mgl32.Vec3
+	skeletonBoneIndices         map[stingray.FileID][]int
+	rootUnitInfo                *unit.Info
+	animationBoneMap            []int
+	animationLocals             []mgl32.Mat4
+	animationGlobals            []mgl32.Mat4
+	animationRootBone           int
+	animationRootReference      mgl32.Vec3
+	animationRootReferenceValid bool
+	animationPlayer             animationPlayback
+	animationEnabled            bool
+	animationResourceIDs        []stingray.FileID
 
 	maxViewDistance float32
 
@@ -441,6 +443,9 @@ func (pv *UnitPreviewState) MaterialsReady() bool {
 }
 
 func (pv *UnitPreviewState) SetAnimationEnabled(enabled bool) {
+	if enabled && !pv.animationEnabled {
+		pv.animationRootReferenceValid = false
+	}
 	pv.animationEnabled = enabled
 }
 
@@ -495,6 +500,8 @@ func (pv *UnitPreviewState) ReleaseLoadedUnit() {
 	pv.animationLocals = nil
 	pv.animationGlobals = nil
 	pv.animationRootBone = -1
+	pv.animationRootReference = mgl32.Vec3{}
+	pv.animationRootReferenceValid = false
 	pv.animationPlayer.reset()
 	pv.root = unitPreviewNode{}
 	pv.rootHash = stingray.FileID{}
