@@ -36,7 +36,6 @@ import (
 	"github.com/xypwn/filediver/cmd/filediver-gui/github"
 	"github.com/xypwn/filediver/cmd/filediver-gui/imgui_wrapper"
 	"github.com/xypwn/filediver/cmd/filediver-gui/imutils"
-	"github.com/xypwn/filediver/cmd/filediver-gui/tasks"
 	"github.com/xypwn/filediver/cmd/filediver-gui/widgets"
 	"github.com/xypwn/filediver/cmd/filediver-gui/widgets/previews"
 	"github.com/xypwn/filediver/config"
