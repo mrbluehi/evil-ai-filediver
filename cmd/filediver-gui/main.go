@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	crand "crypto/rand"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -81,47 +80,6 @@ const ffmpegFeatures = `- Preview video
 - Convert video to MP4`
 
 const scriptsDistFeatures = `- Export models (units/geometry_groups/prefabs/levels) and materials to .blend (Blender)`
-
-var selfUpdateTask tasks.TaskFunc = tasks.Pipeline(
-	"Preparing##prep##0.1", func(ctx context.Context, params map[string]any, onProgress func(prog float64), onStatus func(string)) (result map[string]any, err error) {
-		executable, err := os.Executable()
-		if err != nil {
-			return nil, err
-		}
-		executable, err = filepath.EvalSymlinks(executable)
-		if err != nil {
-			return nil, err
-		}
-		tempPath := executable + "." + randomHexString(8)
-		return map[string]any{
-			"temp": tempPath,
-			"exe":  executable,
-			"old":  filepath.Join(filepath.Dir(tempPath), "."+filepath.Base(tempPath)+".old"),
-		}, nil
-	},
-	"prep.temp->dl.dest", "url->dl.url", true, "->dl.progressStatus", 0777, "->dl.perms",
-	"##dl##100", tasks.Tasks.Download,
-	"prep.temp->inst.temp", "prep.exe->inst.exe", "prep.old->inst.old", "oldExeInfoPath->inst.oldExeInfoPath",
-	"Installing##inst##1", func(ctx context.Context, params map[string]any, onProgress func(prog float64), onStatus func(string)) (result map[string]any, err error) {
-		tempPath := params["temp"].(string)
-		exePath := params["exe"].(string)
-		oldPath := params["old"].(string)
-		oldExeInfoPath := params["oldExeInfoPath"].(string)
-		if err := os.Rename(exePath, oldPath); err != nil {
-			return nil, err
-		}
-		if err := os.Rename(tempPath, exePath); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(oldExeInfoPath, []byte(oldPath), 0666); err != nil {
-			return nil, err
-		}
-		if err := hideFile(oldPath); err != nil {
-			return nil, err
-		}
-		return nil, nil
-	},
-)
 
 type guiApp struct {
 	showErrorPopup func(error)
@@ -223,8 +181,6 @@ type guiApp struct {
 	checkUpdatesErr             error
 	checkUpdatesLock            sync.Mutex
 	unitAnimationScan           unitAnimationScanState
-
-	autoUpdateEx *tasks.TaskExecution
 
 	exportDir                   string
 	exportNotifyWhenDone        bool
@@ -396,8 +352,8 @@ func (a *guiApp) onInitWindow(state *imgui_wrapper.State) error {
 		}
 
 		scriptsDistAsset := github.ReleaseAsset{}
-		scriptsDistAsset.User = "xypwn"
-		scriptsDistAsset.Repo = "filediver"
+		scriptsDistAsset.User = "mrbluehi"
+		scriptsDistAsset.Repo = "evil-ai-filediver"
 		if runtime.GOOS == "windows" {
 			scriptsDistAsset.Filename = "scripts-dist-windows.zip"
 		} else {
@@ -696,7 +652,7 @@ func (a *guiApp) onDraw(state *imgui_wrapper.State) {
 	// imutils.PopupManager, meaning
 	// the popups will appear in the
 	// order they're drawn.
-	a.drawCheckForUpdatesPopup(state)
+	a.drawCheckForUpdatesPopup()
 	a.drawWelcomePopup()
 	a.drawExtensionsWarningPopup()
 	a.drawExtensionsPopup()
@@ -2447,7 +2403,7 @@ func (a *guiApp) drawSettingsWindow() {
 	}
 }
 
-func (a *guiApp) drawCheckForUpdatesPopup(state *imgui_wrapper.State) {
+func (a *guiApp) drawCheckForUpdatesPopup() {
 	a.checkUpdatesLock.Lock()
 	if a.checkUpdatesOnStartupBGDone && !a.checkUpdatesOnStartupFGDone {
 		if a.checkUpdatesErr == nil && a.checkUpdatesNewVersion != version {
@@ -2458,21 +2414,6 @@ func (a *guiApp) drawCheckForUpdatesPopup(state *imgui_wrapper.State) {
 	a.checkUpdatesLock.Unlock()
 
 	imgui.SetNextWindowPosV(imgui.MainViewport().Center(), imgui.CondAlways, imgui.NewVec2(0.5, 0.5))
-	a.popupManager.Popup("Restart for update to take effect", func(close func()) {
-		imgui.PushTextWrapPos()
-		imgui.TextUnformatted("Update completed.")
-		imgui.TextUnformatted("Restart Filediver for the changes to take effect.")
-		if imgui.ButtonV("Close Filediver", imutils.SVec2(200, 0)) {
-			state.WindowShouldClose = true
-		}
-		imgui.SameLine()
-		if imgui.ButtonV("Dismiss", imutils.SVec2(200, 0)) {
-			close()
-		}
-		imgui.PopTextWrapPos()
-	}, imgui.WindowFlagsAlwaysAutoResize, true)
-
-	imgui.SetNextWindowPosV(imgui.MainViewport().Center(), imgui.CondAlways, imgui.NewVec2(0.5, 0.5))
 	a.popupManager.Popup("Check for updates", func(close func()) {
 		a.checkUpdatesLock.Lock()
 		if a.checkUpdatesErr == nil {
@@ -2481,32 +2422,9 @@ func (a *guiApp) drawCheckForUpdatesPopup(state *imgui_wrapper.State) {
 			} else if a.checkUpdatesNewVersion == version {
 				imutils.Textcf(imgui.NewVec4(0, 0.7, 0, 1), fnt.I.Check+"Up-to-date (version %v)", version)
 			} else {
-				imutils.Textcf(imgui.NewVec4(0.8, 0.8, 0, 1), fnt.I.Exclamation+"New version available: %v", a.checkUpdatesNewVersion)
+				imutils.Textcf(imgui.NewVec4(0.8, 0.8, 0, 1), fnt.I.Exclamation+"New fork release available: %v", a.checkUpdatesNewVersion)
 				imgui.TextLinkOpenURLV(fnt.I.OpenInBrowser+" Download from Browser", a.checkUpdatesDownloadURL)
-				autoUpdateSt := a.autoUpdateEx.Poll()
-				if autoUpdateSt.Done {
-					if autoUpdateSt.Err != nil && !errors.Is(autoUpdateSt.Err, context.Canceled) {
-						imutils.TextError(autoUpdateSt.Err)
-					}
-					if autoUpdateSt.JustFinished {
-						if autoUpdateSt.Err == nil {
-							a.popupManager.Open["Restart for update to take effect"] = true
-							a.popupManager.Open["Check for updates"] = false
-						}
-						a.autoUpdateEx.Cancel()
-					}
-					if imgui.ButtonV(fnt.I.Download+" Self-Update", imutils.SVec2(250, 0)) {
-						a.autoUpdateEx = selfUpdateTask.Go(a.ctx, map[string]any{
-							"url":            a.checkUpdatesDownloadURL,
-							"oldExeInfoPath": filepath.Join(a.downloadsDir, "old_executable"),
-						})
-					}
-				} else {
-					widgets.DrawTask(fnt.I.Update+" Updating", autoUpdateSt)
-					if imgui.ButtonV(fnt.I.Cancel+" Cancel", imutils.SVec2(250, 0)) {
-						a.autoUpdateEx.Cancel()
-					}
-				}
+				imgui.TextWrapped("Updates are downloaded manually from this fork; Filediver will not replace its executable.")
 			}
 		} else {
 			imutils.TextError(a.checkUpdatesErr)
@@ -2845,8 +2763,8 @@ func detectAndMaybeDeleteLegacyExtensions(downloadsDir string) error {
 func getNewestVersion() (newVersion, downloadURL string, err error) {
 	asset := github.ReleaseAsset{
 		Repository: github.Repository{
-			User: "xypwn",
-			Repo: "filediver",
+			User: "mrbluehi",
+			Repo: "evil-ai-filediver",
 		},
 	}
 	if runtime.GOOS == "windows" {
@@ -2859,12 +2777,6 @@ func getNewestVersion() (newVersion, downloadURL string, err error) {
 		return "", "", err
 	}
 	return info.ResolvedVersion, info.DownloadUrl, nil
-}
-
-func randomHexString(nBytes int) string {
-	b := make([]byte, nBytes)
-	crand.Read(b)
-	return hex.EncodeToString(b)
 }
 
 func main() {
